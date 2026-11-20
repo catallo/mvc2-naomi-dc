@@ -1,7 +1,8 @@
 name: Release
 
 # Builds the Windows, 3DS and PSP zips, the 3DS CIA and the MiSTer package, and attaches them to the release (by hand: with a tag, or none to only
-# build). The ROM-exact builds can't run here: SHC and Sega's SDK libraries can't be redistributed.
+# build; nightly.yml calls it with a version to build only). The ROM-exact builds can't run here: SHC and Sega's SDK libraries can't be
+# redistributed.
 on:
   release:
     types: [published]
@@ -10,6 +11,12 @@ on:
       tag:
         description: Release tag to attach the zips to (empty to only build)
         required: false
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        description: The packages' version
+        required: true
         type: string
 
 permissions:
@@ -39,7 +46,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.sha }}
 
       - name: Build
         run: |
@@ -66,7 +73,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.sha }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -111,7 +118,7 @@ jobs:
       - name: Package
         id: package
         env:
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || inputs.version }}
         run: |
           version="${TAG:-$(git rev-parse --short=7 HEAD)}"
           name="mvc2-3ds-$version"
@@ -159,7 +166,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.sha }}
 
       - name: Build
         run: |
@@ -169,7 +176,7 @@ jobs:
       - name: Package
         id: package
         env:
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || inputs.version }}
         run: |
           version="${TAG:-$(git rev-parse --short=7 HEAD)}"
           name="mvc2-psp-$version"
@@ -219,7 +226,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.sha }}
 
       - name: Get SDL3
         working-directory: .
@@ -233,7 +240,7 @@ jobs:
 
       - name: Build
         env:
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || inputs.version }}
         run: |
           cmake -G Ninja -B build -DCMAKE_C_COMPILER=gcc -DCMAKE_PREFIX_PATH="$(cygpath -m "$RUNNER_TEMP")/sdl3/i686-w64-mingw32" \
             -DMVC2_VERSION="${TAG:-${GITHUB_SHA::7}}"
@@ -242,7 +249,7 @@ jobs:
       - name: Package
         id: package
         env:
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || inputs.version }}
         run: |
           version="${TAG:-${GITHUB_SHA::7}}"
           name="mvc2-windows-$version"
@@ -273,12 +280,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.sha }}
 
       - name: Build and package
         id: package
         env:
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || inputs.version }}
         run: |
           version="${TAG:-${GITHUB_SHA::7}}"
           sh ports/tools/mister/build.sh "$version" dist
@@ -296,7 +303,7 @@ jobs:
 
   publish:
     needs: [package, pc, psp, mister]
-    if: github.event_name == 'release' || inputs.tag != ''
+    if: (github.event_name == 'release' || inputs.tag != '') && !inputs.version
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -312,5 +319,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || inputs.version }}
         run: gh release upload "$TAG" assets/* --clobber
