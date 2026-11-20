@@ -288,6 +288,7 @@ void mister_input_read(HOST_INPUT* in) {
     uint64_t now = mister_us();
     if (joy_open()) {
         joy_read(in);
+        input_opposites(in);
         return;
     }
     if (now >= next_scan) {
@@ -313,6 +314,7 @@ void mister_input_read(HOST_INPUT* in) {
         in->coin |= d->coin;
         d->coin = 0;
     }
+    input_opposites(in);
 }
 
 int mister_input_quit(void) {

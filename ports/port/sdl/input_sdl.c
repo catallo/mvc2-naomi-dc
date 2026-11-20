@@ -274,6 +274,7 @@ void input_read(HOST_INPUT* in) {
             }
         }
     }
+    input_opposites(in);
     for (pl = 0; pl < 2; pl++) {
         if (input_menu_combo(pl)) {
             coin_held = 1;          /* not from the controls screen's buttons */

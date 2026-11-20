@@ -20,6 +20,19 @@ typedef struct {
     int test;               /* the test button */
 } HOST_INPUT;
 
+/* opposite directions held together count as neither, as a stick can't give both */
+static inline void input_opposites(HOST_INPUT* in) {
+    int p;
+    for (p = 0; p < 2; p++) {
+        if ((in->player[p] & (JVS_LEFT | JVS_RIGHT)) == (JVS_LEFT | JVS_RIGHT)) {
+            in->player[p] &= ~(uint32_t)(JVS_LEFT | JVS_RIGHT);
+        }
+        if ((in->player[p] & (JVS_UP | JVS_DOWN)) == (JVS_UP | JVS_DOWN)) {
+            in->player[p] &= ~(uint32_t)(JVS_UP | JVS_DOWN);
+        }
+    }
+}
+
 const HOST_INPUT* host_input(void);     /* this frame's controls (the front end) */
 void nla_frame_input(void);             /* builds the I/O board's report (nl_am.c) */
 
