@@ -2,6 +2,7 @@
  * main_sdl.c  The PC front end on SDL3 (with the GPU renderer) or SDL2: the window, the frame loop, input
  */
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -150,6 +151,7 @@ static void save_bmp(const char* name, const uint32_t* argb, int w, int h) {
 /* the GPU's frame read back, at most once a frame */
 #ifdef MVC2_SDL3
 static int frame_read;
+static char window_shot[32];    /* a shot show() takes from the window this frame */
 #endif
 
 static void read_frame(void) {
@@ -190,6 +192,10 @@ static void screenshot(void) {
             save_bmp(name, big, w, h);
         }
         free(big);
+        return;
+    }
+    if (gpu) {
+        snprintf(window_shot, sizeof window_shot, "%s", name);
         return;
     }
 #endif
@@ -338,6 +344,7 @@ static SDL_Texture* gpu_frame(void) {
         SDL_DestroyProperties(props);
         if (gpu_screen != NULL) {
             SDL_SetTextureScaleMode(gpu_screen, SDL_SCALEMODE_NEAREST);
+            SDL_SetTextureBlendMode(gpu_screen, SDL_BLENDMODE_NONE);    /* the frame's alpha isn't shown */
         }
         gpu_wrapped = t, gpu_wrapped_w = w, gpu_wrapped_h = h;
     }
@@ -387,23 +394,78 @@ static void times_update(void) {
 
 static void set_scaling(void);
 
+#ifdef MVC2_SDL3
+/* the game's picture as the window shows it, at r in the window's pixels, each of the 640 by 480 the average of the
+   window's pixels whose centres are in it, saved as window_shot */
+static void shot_window(const SDL_FRect* r) {
+    static uint32_t shot[RD_WIDTH * RD_HEIGHT];
+    SDL_Surface *s, *c = NULL;
+    double sx = r->w / RD_WIDTH, sy = r->h / RD_HEIGHT;
+    int x, y, i, j;
+    SDL_SetRenderLogicalPresentation(renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    s = SDL_RenderReadPixels(renderer, NULL);
+    set_scaling();
+    if (s != NULL) {
+        c = SDL_ConvertSurface(s, SDL_PIXELFORMAT_ARGB8888);
+        SDL_DestroySurface(s);
+    }
+    if (c == NULL) {
+        host_log("shot %s: %s", window_shot, SDL_GetError());
+        return;
+    }
+    for (y = 0; y < RD_HEIGHT; y++) {
+        int y0 = (int)ceil(r->y + y * sy - 0.5), y1 = (int)ceil(r->y + (y + 1) * sy - 0.5);
+        y0 = y0 < 0 ? 0 : y0, y1 = y1 > c->h ? c->h : y1;
+        for (x = 0; x < RD_WIDTH; x++) {
+            int x0 = (int)ceil(r->x + x * sx - 0.5), x1 = (int)ceil(r->x + (x + 1) * sx - 0.5);
+            uint32_t sum[3] = { 0, 0, 0 }, n;
+            x0 = x0 < 0 ? 0 : x0, x1 = x1 > c->w ? c->w : x1;
+            n = (uint32_t)((x1 - x0) * (y1 - y0));
+            for (j = y0; j < y1; j++) {
+                const uint32_t* p = (const uint32_t*)((const uint8_t*)c->pixels + (size_t)j * c->pitch);
+                for (i = x0; i < x1; i++) {
+                    sum[0] += p[i] >> 16 & 255, sum[1] += p[i] >> 8 & 255, sum[2] += p[i] & 255;
+                }
+            }
+            /* the window shows no alpha */
+            shot[y * RD_WIDTH + x] = n == 0 ? 0xFF000000u : 0xFF000000u | (sum[0] + n / 2) / n << 16 |
+                                                                (sum[1] + n / 2) / n << 8 | (sum[2] + n / 2) / n;
+        }
+    }
+    SDL_DestroySurface(c);
+    save_bmp(window_shot, shot, RD_WIDTH, RD_HEIGHT);
+}
+#endif
+
 static void show(SDL_Texture* t) {
+#ifdef MVC2_SDL3
+    SDL_FRect r = { 0, 0, 0, 0 };
+#endif
     SDL_RenderClear(renderer);
 #ifdef MVC2_SDL3
     if (gpu && gpu_one_to_one && t != NULL) {
         int ow, oh;
-        SDL_FRect r;
         SDL_SetRenderLogicalPresentation(renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
         SDL_GetRenderOutputSize(renderer, &ow, &oh);
         r.w = (float)t->w, r.h = (float)t->h, r.x = (float)((ow - t->w) / 2), r.y = (float)((oh - t->h) / 2);
         SDL_RenderTexture(renderer, t, NULL, &r);
         set_scaling();
-    } else
-#endif
+    } else {
+        SDL_GetRenderLogicalPresentationRect(renderer, &r);
+        SDL_RenderTexture(renderer, t, NULL, NULL);
+    }
+#else
     SDL_RenderTexture(renderer, t, NULL, NULL);
+#endif
     if (times_on && times_tex != NULL) {
         render_at(renderer, times_tex, 4, 4, TIMES_W, TIMES_H);
     }
+#ifdef MVC2_SDL3
+    if (window_shot[0] != 0) {
+        shot_window(&r);
+        window_shot[0] = 0;
+    }
+#endif
     pace();
     SDL_RenderPresent(renderer);
 }
@@ -551,6 +613,7 @@ static int make_renderer(int want_gpu) {
     }
 #endif
     screen = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, RD_WIDTH, RD_HEIGHT);
+    SDL_SetTextureBlendMode(screen, SDL_BLENDMODE_NONE);
 #ifdef MVC2_SDL3
     SDL_SetTextureScaleMode(screen, SDL_SCALEMODE_NEAREST);     /* SDL3's default is linear */
 #endif

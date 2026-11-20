@@ -106,7 +106,8 @@ host that can't have that address (a multiple of 64 KB, clear of 0x0C000000 to 0
 `build/mvc2dc` is the Dreamcast alone. Test runs show no message boxes and run as fast as they can unless
 `MVC2_FPS` is set:
 
-- `MVC2_FRAMES=n` stops after n frames; `MVC2_SHOT=n,m,...` saves those frames as `shot_n.bmp`;
+- `MVC2_FRAMES=n` stops after n frames; `MVC2_SHOT=n,m,...` saves those frames as `shot_n.bmp` (on the GPU, the
+  window's picture at 640 by 480);
 - `MVC2_PRESS=n:key,...` has player 1 press start, up, down, left, right or b1 to b6 at frame n, and
   `n:coin` and `n:switch` put a coin in or switch versions;
 - the arcade's unless `--dc`; no memory card unless `MVC2_VMU=FILE` (a missing file is a blank card);
