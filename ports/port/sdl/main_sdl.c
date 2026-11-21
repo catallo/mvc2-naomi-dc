@@ -23,6 +23,10 @@
 #include "menu_sdl.h"
 #include "test_mode.h"
 #include "hunt.h"
+#ifdef _WIN32
+#include "console_win32.h"
+void config_read(void);             /* start.c */
+#endif
 
 void sdl_audio_open(void);         /* sdl_audio.c */
 void sdl_audio_frame(void);
@@ -49,6 +53,7 @@ static unsigned presented;
 static int switch_req;      /* F9 */
 static int coin_req;
 static int test_run;        /* MVC2_FRAMES: the press list is the only input */
+static int console_read = 1;    /* stderr outlives the game: a file, a pipe or the terminal it was started from */
 
 /* MVC2_PRESS=n:key,...: player 1 holds the key for 5 frames from frame n (p2key: player 2); coin and switch
    happen at n */
@@ -885,6 +890,23 @@ void* host_try_calloc(size_t n, size_t size) {
     return calloc(n, size);
 }
 
+/* why the game stops: on stderr, and in a box where nobody would read that */
+static void stop_box(const char* text) {
+    fprintf(stderr, "%s\n", text);
+    if (!console_read && !test_run) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Marvel vs. Capcom 2", text, window);
+    }
+}
+
+/* a start that failed, unless the player was already told why */
+static void not_started(void) {
+    if (pick_why() == PICK_BAD_DISC) {
+        return;
+    }
+    stop_box(console_read || test_run ? "The game could not start."
+                                      : "The game could not start. With console = yes in mvc2.cfg, the console says why.");
+}
+
 void host_out_of_memory(const char* what, size_t bytes) {
     char text[200];
     snprintf(text, sizeof text, "Out of memory: %s of %lu bytes failed.", what, (unsigned long)bytes);
@@ -901,10 +923,15 @@ int main(int argc, char** argv) {
     long frames_left = getenv("MVC2_FRAMES") ? atol(getenv("MVC2_FRAMES")) : -1;
 
     test_run = frames_left >= 0;
+#ifdef _WIN32
+    console_read = console_start();
+#endif
     hunting = test_run && hunt_init();
 
     if (!naomi_map_ram()) {
-        fprintf(stderr, "could not map main RAM at %08X\n", NAOMI_RAM_BASE);
+        char text[100];
+        snprintf(text, sizeof text, "Could not map the game's main RAM at %08X.", NAOMI_RAM_BASE);
+        stop_box(text);
         return 1;
     }
     host_divzero_install();
@@ -915,9 +942,17 @@ int main(int argc, char** argv) {
     SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | (test_run ? 0 : SDL_INIT_GAMECONTROLLER)) != 0) {
 #endif
-        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+        char text[300];
+        snprintf(text, sizeof text, "SDL_Init: %s", SDL_GetError());
+        stop_box(text);
         return 1;
     }
+#ifdef _WIN32
+    config_read();
+    if (config_get("console") != NULL && strcmp(config_get("console"), "yes") == 0) {
+        console_open();     /* closed with the game: a stop still shows its box */
+    }
+#endif
     if (!pick_game(argc, argv) && !missing_screen(argc, argv)) {
         return 1;
     }
@@ -927,7 +962,9 @@ int main(int argc, char** argv) {
 #endif
     input_init();
     if (window == NULL && !open_window()) {
-        fprintf(stderr, "SDL: %s\n", SDL_GetError());
+        char text[300];
+        snprintf(text, sizeof text, "No window: %s", SDL_GetError());
+        stop_box(text);
         return 1;
     }
     if (frames_left < 0 || getenv("MVC2_FL_AUDIO")) {
@@ -936,6 +973,7 @@ int main(int argc, char** argv) {
     host_keep_start();
     rd_begin_frame();
     if (!start_game()) {
+        not_started();
         return 1;
     }
     while (!quit) {
@@ -988,6 +1026,7 @@ int main(int argc, char** argv) {
             gpu_restart(1);
             sdl_save_flush();
             if (other ? !switch_game() : (host_restart(), !start_game())) {
+                not_started();
                 quit = 1;
                 continue;
             }

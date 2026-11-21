@@ -66,6 +66,7 @@ int nlaJAMMANodes;
 NLA_JAMMA_INFO nlaJAMMAInfo[31];
 char nlaJAMMAInput[31][512];
 int nlaJAMMAAcknowledgeIndex[31][256];
+int nlaJAMMAAcknowError[31][8];
 unsigned char nlaInput6149[16];         /* [5]: test and service, active low */
 
 void nlaJAMMAInit(void) {

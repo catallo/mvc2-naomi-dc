@@ -65,12 +65,29 @@ static void mul(float* d, const float* a, const float* b) {
 }
 #endif
 
+/* the sine of the angle plus quarter turns, taken from within an eighth of a turn: mingw's sin and cos (x87 fsin and
+   fcos) are wrong at whole quarter turns, which glibc's and newlib's are not */
+static float turn_sin(int ang, int quarter) {
+    int a = ang & 0xffff, q = (a + 0x2000) >> 14;
+    double r = (a * (6.283185307179586 / 65536.0) - q * 1.57079632673412561417) - q * 6.07710050650619224932e-11;
+    switch ((q + quarter) & 3) {
+    case 0:
+        return (float)sin(r);
+    case 1:
+        return (float)cos(r);
+    case 2:
+        return (float)-sin(r);
+    default:
+        return (float)-cos(r);
+    }
+}
+
 static float sin_a(int ang) {
-    return (float)sin((ang & 0xffff) * (6.283185307179586 / 65536.0));
+    return turn_sin(ang, 0);
 }
 
 static float cos_a(int ang) {
-    return (float)cos((ang & 0xffff) * (6.283185307179586 / 65536.0));
+    return turn_sin(ang, 1);
 }
 
 #ifdef __3DS__

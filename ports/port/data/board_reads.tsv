@@ -1,0 +1,1 @@
+wall_dust	wall_dust_star_step	static const Float wall_dust2_fade_tbl[6] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.2f, } ;	static const Float wall_dust2_fade_tbl[7] = { 1.0f, 1.0f, 1.0f, 1.0f, 0.5f, 0.2f, 1.1708845e-38f, } ;	1

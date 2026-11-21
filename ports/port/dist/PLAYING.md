@@ -126,6 +126,12 @@ The timer, gauges, words and menus:
 `unlock = all` lets you choose every character, colour and stage. Your saves keep only what you really
 unlocked, but games played this way still count in the records.
 
+### Console (Windows)
+
+`console = yes` opens a console beside the game with what it reports: the data it found, the controllers,
+and why it stopped if it does. It is off by default. Started from a terminal, the game writes there anyway; to
+keep it in a file, `mvc2.exe > log.txt 2>&1` in cmd, or `.\mvc2.exe 2>&1 | Out-File log.txt` in PowerShell.
+
 ## Sound
 
 The AICA's own driver runs on an emulated ARM7 with its DSP; the Dreamcast's ADX music is decoded by the

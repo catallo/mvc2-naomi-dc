@@ -147,6 +147,13 @@ static void read_config(void) {
     }
 }
 
+#ifdef _WIN32
+/* for main_sdl.c's console = yes, before the data is looked for */
+void config_read(void) {
+    read_config();
+}
+#endif
+
 const char* config_get(const char* key) {
     int i;
     for (i = 0; i < config_n; i++) {
