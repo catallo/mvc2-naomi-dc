@@ -1,0 +1,2 @@
+pls18_00	pls18_00_idle_init	ef_char_set2( ew, 27, tbl->no + Rnd() % 3, Rnd() % 10 ) ;	{ Uint32 rnd = Rnd() % 10 ; ef_char_set2( ew, 27, tbl->no + Rnd() % 3, rnd ) ; }	1
+pls18_00	pls18_00_idle_fix_init	ef_char_set2( ew, 27, tbl->no + Rnd() % 3, Rnd() % 10 ) ;	{ Uint32 rnd = Rnd() % 10 ; ef_char_set2( ew, 27, tbl->no + Rnd() % 3, rnd ) ; }	1

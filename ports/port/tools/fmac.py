@@ -6,11 +6,11 @@ one side, asks SHC which of them it fused (by recompiling the module with one pr
 call: a fused site's module has one FMAC fewer), and writes the fused sites to a list: module,
 routine, the sum's place among the routine's sums with a product (n/total) and the product's side.
 At build time `rewrite` gives a host copy of a module with those sites as FMAC( a, b, c ), and with
-the statements EDITS.tsv lists changed (the ARM hosts' float-to-unsigned conversions, through
-sh_u32). A routine whose sums or statements changed stops it: run `find` on that module again.
+the statements the EDITS.tsv files list changed (every host's calls whose arguments SHC's code takes
+in another order than gcc's, and the ARM hosts' float-to-unsigned conversions, through sh_u32). A routine whose sums or statements changed stops it: run `find` on that module again.
 
 usage: fmac.py find DECOMP SITES.tsv [MODULE.c ...]     (SHC set in the environment)
-       fmac.py rewrite SITES.tsv SRC.c OUT.c [EDITS.tsv]
+       fmac.py rewrite SITES.tsv SRC.c OUT.c [EDITS.tsv ...]
 """
 import os
 import re
@@ -640,9 +640,9 @@ def find_sites(decomp, srcs, out):
 
 
 def arm_edits(text, stem, edits):
-    """The text with each statement edits lists (module, routine, the statement, what it becomes, how many
-    times the routine has it) changed; an edit that no longer finds its statements stops."""
-    rows = [l.split("\t") for l in Path(edits).read_text().splitlines()] if edits else []
+    """The text with each statement the edits files list (module, routine, the statement, what it becomes, how
+    many times the routine has it) changed; an edit that no longer finds its statements stops."""
+    rows = [l.split("\t") for e in edits for l in Path(e).read_text().splitlines()]
     for _, name, old, new, count in (r for r in rows if r[0] == stem):
         spans = [(s, e) for n, s, e in routines(text) if n == name]   # one, or one in each program's arm
         got = sum(text[s:e].count(old) for s, e in spans)
@@ -653,9 +653,9 @@ def arm_edits(text, stem, edits):
     return text
 
 
-def rewrite(sites, src, out, edits=None):
+def rewrite(sites, src, out, edits=()):
     """A host copy of src with its fused sums as FMAC( a, b, c ), and the statements edits lists changed
-    (on an ARM host, each float made unsigned through sh_u32)."""
+    (such as, on an ARM host, each float made unsigned through sh_u32)."""
     want = {}
     for l in Path(sites).read_text().splitlines():
         stem, name, nth, side = l.split("\t")[:4]
@@ -691,4 +691,4 @@ if __name__ == "__main__":
             srcs = [p for p in srcs if p.name not in {d.name for d in dc}] + dc
         find_sites(decomp, sys.argv[4:] or srcs, sys.argv[3])
     elif sys.argv[1] == "rewrite":
-        rewrite(*sys.argv[2:6])
+        rewrite(*sys.argv[2:5], sys.argv[5:])

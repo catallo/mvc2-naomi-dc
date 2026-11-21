@@ -32,7 +32,8 @@ static __inline__ float host_fmac( float a, float b, float c )
 	return ( float )( ( double )a * b + c ) ;
 }
 #endif
-#define FMAC( a, b, c )		host_fmac( a, b, c )
+/* its operands in the order SHC's code takes them, as a call's arguments are in no set order */
+#define FMAC( a, b, c )		__extension__ ( { float fmac_a = ( a ) ; float fmac_b = ( b ) ; host_fmac( fmac_a, fmac_b, c ) ; } )
 
 /* a float made unsigned as SHC's code makes it: 2^32 off a value of 2^31 or more, then truncated as an
    int, so a negative wraps (ARM's own conversion stops it at 0); port/data/arm_u32.tsv lists the uses */
