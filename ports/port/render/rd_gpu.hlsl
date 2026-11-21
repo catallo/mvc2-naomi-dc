@@ -69,7 +69,7 @@ cbuffer Draw : register(b0, space3) {
     float mip_bias;
     int mode;           /* 0 shade, 1 the nearest 1/w past the last layer, 2 the first place at it,
                            3 shade that fragment and blend it over under, 4 under where the last layer's fragment
-                           was, 5 one for each fragment */
+                           was, 5 one for each fragment, 6 mip_bias, 7 under */
     int blend;          /* source factor + 16 * destination factor */
 };
 
@@ -296,6 +296,12 @@ bool past_last(float q, float order, int2 p) {
 
 float4 ps_main(VOut i) : SV_Target0 {
     int2 p = int2(i.pos.xy);
+    if (mode == 6) {
+        return float4(mip_bias, 0, 0, 0);
+    }
+    if (mode == 7) {
+        return under.Load(int3(p, 0));
+    }
     float2 at = i.pos.xy * inv_scale;   /* the pixel's centre in the game's pixels */
     float z = i.q;
     /* the helper pixels carry the steps past the edges */

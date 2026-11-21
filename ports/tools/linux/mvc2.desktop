@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Marvel vs. Capcom 2
+Comment=The arcade game and the Dreamcast version
+Exec=mvc2
+Icon=mvc2
+Categories=Game;
+Terminal=false

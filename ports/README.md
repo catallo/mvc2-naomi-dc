@@ -6,9 +6,9 @@ game is compiled for the host, and the port supplies what the NAOMI board, the D
 did.
 
 To play on Windows, unzip a release, put the game's data in `roms/mvsc2` and `disc` beside `mvc2.exe`, and
-run it; `PLAYING.md` has the keys and settings. For the 3DS, see [3DS.md](3DS.md); for the PSP, which plays the
-Dreamcast version, [PSP.md](PSP.md); for the MiSTer, with the Pinedra GPU core,
-[MISTER.md](MISTER.md).
+run it; `PLAYING.md` has the keys and settings. On Linux the same, with the `.AppImage`. For the 3DS, see
+[3DS.md](3DS.md); for the PSP, which plays the Dreamcast version, [PSP.md](PSP.md); for the MiSTer, with the
+Pinedra GPU core, [MISTER.md](MISTER.md).
 
 For the Dreamcast version, on the PC, the 3DS and the PSP alike, put any one of these in `disc`:
 
@@ -171,11 +171,25 @@ scene sees it (a `HOST_PORT` arm in the decomp's `select.c`), so the saved unloc
 Saves are kept beside the executable: the Dreamcast's memory card as `vmu_save_A1.bin` (a VMU's 128 KB flash
 image, as Flycast keeps it), the arcade's settings and book-keeping as `eeprom.bin` and `backup.bin`.
 
-## Linux (32-bit ARM)
+## Linux (32-bit x86 and ARM)
 
-It builds for 32-bit ARM Linux (`armhf`: a Raspberry Pi's 32-bit system, MiSTer's Cortex-A9), natively or
-with a cross compiler, against SDL3 or SDL2, but it has not been run yet. 32-bit x86 Linux needs coroutines
-and a division-by-zero handler in `port/sys` first. Cross-building from Debian, with SDL built for `armhf`:
+On x86 it is the PC build for Linux (a Steam Machine, or any x86-64 system with 32-bit libraries): `i686`, as on
+Windows. The release's is built in `tools/linux/Dockerfile`'s image (Debian bullseye's i386 gcc, so glibc 2.31, and
+SDL 3.4.2 built there) by `sh tools/linux/build.sh VERSION OUTDIR`, which writes `mvc2-linux-VERSION.tar.gz`: the
+Windows zip's files, with `MvC2-VERSION-i686.AppImage` for the executables (`mvc2`, its RPATH `$ORIGIN`, beside
+`libSDL3.so.0` and the `libxkbcommon.so.0` that SDL's Wayland needs, with `tools/linux/mvc2.desktop` and the icon,
+behind AppImage's type-2 runtime). Run from an
+AppImage (`$APPIMAGE`), the game keeps its data, `mvc2.cfg` and saves in the AppImage's folder. Elsewhere, with
+gcc's 32-bit libraries and an i686 SDL3:
+
+    cmake -G Ninja -B build-linux -DCMAKE_C_FLAGS=-m32 -DCMAKE_PREFIX_PATH=SDL_PREFIX
+    ninja -C build-linux
+
+Drawn in software, its frames are Windows', bit for bit. It links at 0x400000, as Windows does, so its heap starts far below the
+game's RAM; `port/sys/divzero_i386.c` makes a division by zero give 0 from SIGFPE.
+
+32-bit ARM (`armhf`: a Raspberry Pi's 32-bit system, MiSTer's Cortex-A9) builds natively or with a cross
+compiler, against SDL3 or SDL2. Cross-building from Debian, with SDL built for `armhf`:
 
     cmake -G Ninja -B build-arm -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=armv7l \
           -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc -DCMAKE_C_FLAGS="-mcpu=cortex-a9 -mfpu=neon" \

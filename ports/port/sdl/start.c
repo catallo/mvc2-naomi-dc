@@ -68,15 +68,22 @@ static const char* beside_exe(const char* path, char* buf, size_t size) {
     return buf;
 #else
     if (base[0] == 0) {
+        const char* appimage = getenv("APPIMAGE");
+        const char* slash = appimage != NULL ? strrchr(appimage, '/') : NULL;
+        if (slash != NULL) {
+            /* an AppImage runs from a mount of its own: the folder that holds it */
+            snprintf(base, sizeof base, "%.*s", (int)(slash + 1 - appimage), appimage);
+        } else {
 #ifdef MVC2_SDL3
-        const char* b = SDL_GetBasePath();
+            const char* b = SDL_GetBasePath();
 #else
-        char* b = SDL_GetBasePath();
+            char* b = SDL_GetBasePath();
 #endif
-        snprintf(base, sizeof base, "%s", b != NULL ? b : "");
+            snprintf(base, sizeof base, "%s", b != NULL ? b : "");
 #ifndef MVC2_SDL3
-        SDL_free(b);
+            SDL_free(b);
 #endif
+        }
     }
     snprintf(buf, size, "%s%s", base, path);
     return buf;

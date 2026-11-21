@@ -186,6 +186,10 @@ static void save_file(const char* name, const char* p, int size) {
     if (mister_save_later(name, p, size)) {
         return;
     }
+#elif !defined(__PSP__)
+    if (sdl_save_later(name, p, size)) {
+        return;
+    }
 #endif
     host_save_file(name, p, size);
 }

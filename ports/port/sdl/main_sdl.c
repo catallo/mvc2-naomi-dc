@@ -238,6 +238,8 @@ static void pace(void) {
 }
 
 static int scaling;     /* 0 aspect, 1 integer, 2 stretch */
+static int scale_given; /* by mvc2.cfg or F10, else set_scaling's choice */
+static void set_scaling(void);
 
 #ifdef MVC2_SDL3
 static SDL_GPUTexture* gpu_wrapped;     /* gpu_screen's */
@@ -272,6 +274,9 @@ void view_settings(void) {
         if (hud != NULL && strcmp(hud, hud_names[i]) == 0) {
             view_hud = i;
         }
+    }
+    if (renderer != NULL) {
+        set_scaling();
     }
 }
 
@@ -391,8 +396,6 @@ static void times_update(void) {
     menu_text(text, TIMES_W, TIMES_H, 3, 2, line, 0xFFFFFFFFu, 1);
     SDL_UpdateTexture(times_tex, NULL, text, TIMES_W * 4);
 }
-
-static void set_scaling(void);
 
 #ifdef MVC2_SDL3
 /* the game's picture as the window shows it, at r in the window's pixels, each of the 640 by 480 the average of the
@@ -525,6 +528,10 @@ static void set_scaling(void) {
                                                            SDL_LOGICAL_PRESENTATION_INTEGER_SCALE,
                                                            SDL_LOGICAL_PRESENTATION_STRETCH };
     SDL_GetCurrentRenderOutputSize(renderer, &w, &h);
+    if (!scale_given) {
+        /* texel sprites full screen: 2688 by 2016 shown pixel for pixel where it fits */
+        scaling = view_sprites == RD_SPRITES_TEXEL && (SDL_GetWindowFlags(window) & FULLSCREEN) && w >= 2688 && h >= 2016;
+    }
     small = w < RD_WIDTH || h < RD_HEIGHT;
     SDL_SetRenderLogicalPresentation(renderer, RD_WIDTH, RD_HEIGHT, mode[scaling == 1 && small ? 0 : scaling]);
 #else
@@ -564,7 +571,7 @@ static void open_gpu(void) {
             if (rd_gpu_init(gpu)) {
                 renderer = SDL_CreateGPURenderer(gpu, window);
                 if (renderer != NULL) {
-                    host_log("renderer: gpu (%s)", SDL_GetGPUDeviceDriver(gpu));
+                    host_log("renderer: gpu (%s, %s)", SDL_GetGPUDeviceDriver(gpu), SDL_GetCurrentVideoDriver());
                     return;
                 }
             }
@@ -667,6 +674,9 @@ static int open_window(void) {
     keep_settings = getenv("MVC2_FRAMES") == NULL;
     if (!keep_settings) {
         full = NULL;
+    } else if (full == NULL && getenv("GAMESCOPE_WAYLAND_DISPLAY") != NULL) {
+        /* Steam's Game Mode scales a window up to the screen: full screen unless mvc2.cfg says */
+        full = "yes";
     }
     if (size == NULL || sscanf(size, "%dx%d", &w, &h) != 2) {
         first_size(&w, &h);
@@ -691,7 +701,7 @@ static int open_window(void) {
 #endif
     for (i = 0; i < 3; i++) {
         if (scale != NULL && strcmp(scale, scalings[i]) == 0) {
-            scaling = i;
+            scaling = i, scale_given = 1;
         }
     }
     /* the GPU unless mvc2.cfg says soft; a test run draws by rd_soft.c's rules unless it says gpu */
@@ -726,7 +736,7 @@ static int window_key(const SDL_Event* e) {
         return 1;
     }
     if (key_sym(e) == SDLK_F10) {
-        scaling = (scaling + 1) % 3;
+        scaling = (scaling + 1) % 3, scale_given = 1;
         set_scaling();
         if (keep_settings) {
             config_set("scale", scalings[scaling]);
@@ -879,6 +889,7 @@ void host_out_of_memory(const char* what, size_t bytes) {
     char text[200];
     snprintf(text, sizeof text, "Out of memory: %s of %lu bytes failed.", what, (unsigned long)bytes);
     host_log("stopped: %s", text);
+    sdl_save_flush();
     if (getenv("MVC2_FRAMES") == NULL) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Marvel vs. Capcom 2", text, NULL);
     }
@@ -975,6 +986,7 @@ int main(int argc, char** argv) {
             int other = switch_req;
             switch_req = restart_req = 0;
             gpu_restart(1);
+            sdl_save_flush();
             if (other ? !switch_game() : (host_restart(), !start_game())) {
                 quit = 1;
                 continue;
@@ -1010,6 +1022,7 @@ int main(int argc, char** argv) {
         }
     }
     save_window();
+    sdl_save_flush();
     snd_close();
     sdl_audio_close();
     host_stub_report();

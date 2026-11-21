@@ -24,7 +24,8 @@ static inline int key_alt(const SDL_Event* e) {
 }
 
 static inline int window_resized(const SDL_Event* e) {
-    return e->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED;
+    return e->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED || e->type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN ||
+           e->type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN;
 }
 
 static inline SDL_JoystickID pad_added_id(const SDL_Event* e) {
@@ -84,6 +85,12 @@ static inline SDL_Gamepad* pad_open_added(const SDL_Event* e) {
 #define SDL_GAMEPAD_AXIS_COUNT SDL_CONTROLLER_AXIS_MAX
 
 #define SDL_RenderTexture SDL_RenderCopy
+
+#define SDL_Mutex SDL_mutex
+#define SDL_Condition SDL_cond
+#define SDL_CreateCondition SDL_CreateCond
+#define SDL_SignalCondition SDL_CondSignal
+#define SDL_WaitCondition SDL_CondWait
 
 static inline SDL_JoystickID SDL_GetGamepadID(SDL_GameController* pad) {
     return SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad));

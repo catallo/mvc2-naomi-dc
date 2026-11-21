@@ -1,7 +1,7 @@
 # Marvel vs. Capcom 2: playing
 
-`mvc2.exe` runs the arcade game or the Dreamcast version; `mvc2dc.exe` only the Dreamcast's. No game
-data comes with it.
+`mvc2.exe` runs the arcade game or the Dreamcast version; `mvc2dc.exe` only the Dreamcast's. On Linux the
+`.AppImage` runs both. No game data comes with it.
 
 ## The game's data
 
@@ -101,8 +101,8 @@ How the characters and other flat pictures look when drawn larger:
 - **smooth**: their pixels smoothed.
 - **pixel**: no smoothing at all.
 - **arcade**: the arcade's own filtering.
-- **texel**: the characters' own pixels, each the same size. With `scale = integer`, the game is shown pixel for
-  pixel, 2688 by 2016 on a 4K screen. `texel_grid = shared` (the default) puts every sprite on one grid of the
+- **texel**: the characters' own pixels, each the same size. With `scale = integer` (the default full screen on a
+  4K screen), the game is shown pixel for pixel, 2688 by 2016. `texel_grid = shared` (the default) puts every sprite on one grid of the
   characters' pixels, so a character's parts meet with no slivers; `object` puts each on its own.
 
 ### HUD (`hud`, GPU only)
@@ -135,3 +135,15 @@ port. `MVC2_SOUND=0` turns it off; `MVC2_WAV=file` records it.
 
 The Dreamcast's memory card is `vmu_save_A1.bin` beside the executable, the same file Flycast uses. The
 arcade keeps its settings and book-keeping in `eeprom.bin` and `backup.bin` there.
+
+## Linux and a Steam Machine
+
+The Linux build is one file, `MvC2-VERSION-i686.AppImage`, a 32-bit x86 program. It needs only the system's 32-bit
+C library, FUSE (to open the AppImage) and, for the GPU renderer, its 32-bit Vulkan driver: SteamOS and Steam
+install them. Unpack the archive in a folder you can write to (your home folder): the game's data, `mvc2.cfg` and
+the saves stay beside the AppImage.
+
+On a Steam Machine or Steam Deck, in Desktop Mode: unpack it (say into `~/Games/mvc2`), put the game's data in
+`roms/mvsc2` and `disc` there, then in Steam choose Games, "Add a Non-Steam Game to My Library", Browse, and pick
+the `.AppImage`. Back in Game Mode it is in the library; the controller works as on a PC. To start one version
+directly, put `--arcade` or `--dc` in its Launch Options.

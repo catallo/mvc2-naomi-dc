@@ -155,6 +155,8 @@ int ctr_save_later(const char* name, const void* data, int size); /* a save writ
 void ctr_save_flush(void);                                       /* every save written (ctr_save.c) */
 int mister_save_later(const char* name, const void* data, int size);  /* the same on the MiSTer (mister_save.c) */
 void mister_save_flush(void);
+int sdl_save_later(const char* name, const void* data, int size);     /* the same on the PC (sdl_save.c) */
+void sdl_save_flush(void);
 void mister_log_flush(void);    /* the log's queued lines written (mister_log.c) */
 void mister_log_rescue(void);   /* and from a fatal signal's handler */
 void host_save_file(const char* name, const void* p, int size);  /* written whole or not at all (nl_am.c) */

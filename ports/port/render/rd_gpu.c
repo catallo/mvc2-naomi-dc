@@ -1,6 +1,7 @@
 /*
- * rd_gpu.c  The SDL_GPU back end. The translucent list is peeled a layer at a time, far to near, and
- * each fragment blended by the shader in rd_soft.c's integer sums.
+ * rd_gpu.c  The SDL_GPU back end. The translucent list is drawn far to near in an order found on the CPU, and
+ * where no order holds for a whole triangle it is peeled a layer at a time, each fragment blended by the shader in
+ * rd_soft.c's integer sums.
  */
 
 #include <math.h>
@@ -59,7 +60,7 @@ enum {
 /* 8, though the shader reads 7: SDL's Direct3D 12 driver needs a table size that divides its heaps' */
 #define BINDINGS 8
 
-enum { P_BACKGROUND, P_OPAQUE, P_PUNCH, P_KEY, P_PEEL, P_COUNT, P_FIX, P_KINDS };
+enum { P_BACKGROUND, P_OPAQUE, P_PUNCH, P_SORTED, P_KEY, P_PEEL, P_COUNT, P_FIX, P_FILL, P_COPY, P_KINDS };
 
 /* a run of triangles of one state */
 typedef struct {
@@ -122,11 +123,17 @@ static uint32_t tb_size;
    peeling's draws made from it, so that the layers past it draw nothing. MVC2_GPUCOUNT=0, or a device without
    compute, draws them all */
 static int count_on;
+static int sort_on;         /* MVC2_GPUSORT=0: all of the translucent list peeled */
+static int sorting;         /* this frame */
 static SDL_GPUTexture* count_tex;
 static SDL_GPUComputePipeline *most_cp, *draws_cp;
 static SDL_GPUBuffer *most_buf, *draws_buf, *args_buf;
 static SDL_GPUTransferBuffer* draws_trans;
 static uint32_t draws_cap, args_cap;    /* their entries */
+/* with the counts, each pixel's translucent fragments counted in the stencil too, so that a layer draws only where
+   the pixel has one */
+static int stencil_on, stencil_clear;
+static SDL_GPUTextureFormat depth_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
 
 static uint32_t argb16_to_rgba(int format, uint32_t p) {
     uint32_t a, r, g, b;
@@ -474,6 +481,18 @@ static SDL_GPUGraphicsPipeline* pipeline(int kind, int a, int b) {
     ci.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
     ci.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     ci.depth_stencil_state.enable_depth_test = true;
+    if (stencil_on && kind >= P_KEY) {
+        /* the count adds each fragment; the layers pass where the count is over the layer (the reference) */
+        SDL_GPUStencilOpState* f = &ci.depth_stencil_state.front_stencil_state;
+        f->fail_op = f->depth_fail_op = SDL_GPU_STENCILOP_KEEP;
+        f->pass_op = kind == P_COUNT ? SDL_GPU_STENCILOP_INCREMENT_AND_CLAMP : SDL_GPU_STENCILOP_KEEP;
+        f->compare_op = kind == P_COUNT ? SDL_GPU_COMPAREOP_ALWAYS : kind == P_COPY && a ? SDL_GPU_COMPAREOP_EQUAL
+                      : SDL_GPU_COMPAREOP_LESS;
+        ci.depth_stencil_state.back_stencil_state = *f;
+        ci.depth_stencil_state.compare_mask = 0xFF;
+        ci.depth_stencil_state.write_mask = kind == P_COUNT ? 0xFF : 0;
+        ci.depth_stencil_state.enable_stencil_test = true;
+    }
     memset(&ct, 0, sizeof ct);
     ct.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     switch (kind) {
@@ -501,22 +520,29 @@ static SDL_GPUGraphicsPipeline* pipeline(int kind, int a, int b) {
         ct.blend_state.color_blend_op = ct.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
         ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
         break;
+    case P_FILL:    /* a key target's pixels set where the layer draws */
+        ct.format = SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
+        ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_ALWAYS;
+        break;
+    case P_COPY:    /* the frame copied where the count is over (a: is) the layer */
+        ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_ALWAYS;
+        break;
     case P_PEEL:    /* blended by the shader, over the opaque depth */
     case P_FIX:
         ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
         break;
-    default:        /* P_PUNCH: blended, over the opaque depth, and writing it */
+    default:        /* P_PUNCH and P_SORTED: blended, over the opaque depth; P_PUNCH writing it */
         ct.blend_state.enable_blend = true;
         ct.blend_state.src_color_blendfactor = ct.blend_state.src_alpha_blendfactor = factor(a, 1);
         ct.blend_state.dst_color_blendfactor = ct.blend_state.dst_alpha_blendfactor = factor(b, 0);
         ct.blend_state.color_blend_op = ct.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
         ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
-        ci.depth_stencil_state.enable_depth_write = true;
+        ci.depth_stencil_state.enable_depth_write = kind == P_PUNCH;
         break;
     }
     ci.target_info.color_target_descriptions = &ct;
     ci.target_info.num_color_targets = 1;
-    ci.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    ci.target_info.depth_stencil_format = depth_format;
     ci.target_info.has_depth_stencil_target = true;
     *slot = SDL_CreateGPUGraphicsPipeline(dev, &ci);
     if (*slot == NULL) {
@@ -594,7 +620,7 @@ static int make_targets(float n) {
         key_q[i] = make_texture(SDL_GPU_TEXTUREFORMAT_R32_FLOAT, w, h, 1, key);
         key_o[i] = make_texture(SDL_GPU_TEXTUREFORMAT_R32_FLOAT, w, h, 1, key);
     }
-    depth_tex = make_texture(SDL_GPU_TEXTUREFORMAT_D32_FLOAT, w, h, 1, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET);
+    depth_tex = make_texture(depth_format, w, h, 1, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET);
     if (count_on) {
         count_tex = make_texture(SDL_GPU_TEXTUREFORMAT_R32_FLOAT, w, h, 1, key);
     }
@@ -675,6 +701,7 @@ bool rd_gpu_init(SDL_GPUDevice* device) {
     }
     exact_edges = g == NULL || atoi(g) != 0;
     count_on = c == NULL || atoi(c) != 0;
+    sort_on = getenv("MVC2_GPUSORT") == NULL || atoi(getenv("MVC2_GPUSORT")) != 0;
     if (SDL_GetGPUShaderFormats(dev) & SDL_GPU_SHADERFORMAT_DXBC) {
         SDL_GPUShaderFormat f = SDL_GPU_SHADERFORMAT_DXBC;
         vs = shader(rd_gpu_vs_dxbc, sizeof rd_gpu_vs_dxbc, f, "vs_main", vtx, 0, 0);
@@ -715,6 +742,9 @@ bool rd_gpu_init(SDL_GPUDevice* device) {
             count_on = 0;
         }
     }
+    stencil_on = count_on && SDL_GPUTextureSupportsFormat(dev, SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT, SDL_GPU_TEXTURETYPE_2D,
+                                                          SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET);
+    depth_format = stencil_on ? SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT : SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     if (full_vs != NULL && resolve_ps != NULL) {
         resolve_pipe = make_resolve_pipe();
     }
@@ -739,6 +769,11 @@ bool rd_gpu_init(SDL_GPUDevice* device) {
         if (count_on) {
             pipeline(P_COUNT, 0, 0);
             pipeline(P_FIX, 0, 0);
+        }
+        if (stencil_on) {
+            pipeline(P_FILL, 0, 0);
+            pipeline(P_COPY, 0, 0);
+            pipeline(P_COPY, 1, 0);
         }
         for (a = 0; a < 8; a++) {
             for (b = 0; b < 8; b++) {
@@ -1231,11 +1266,15 @@ static int is_corner(float x, float y) {
    least (side 0) or greatest, lo to hi the other way, meets no edge of another on the lattice (it ends its object
    there) and another sprite's opposite edge, less than a game pixel off, leaves a gap where at 640 by 480 none shows
    (they overlap, or end at the same game pixel's edge), it reaches over the gap to where that one is drawn. Its edge l
-   on the lattice, moved or not */
-static float meet(int axis, int side, float e, float l, float lo, float hi, float k) {
+   on the lattice, moved or not. Shared: on the CPS2's pixels, a gap is at most one of them, and only the sprite that
+   draws the game pixel holding its centre at 640 by 480 reaches over it */
+static float meet(int axis, int side, float e, float l, float lo, float hi, float k, int shared) {
     const EDGE* d = edges[axis];
-    float to = l;
+    float to = l, c = side ? l + 0.5f / k : l - 0.5f / k;
     int a = 0, b = nedges;
+    if (shared && (side ? floorf(c) + 0.5f >= e : floorf(c) + 0.5f < e)) {
+        return l;
+    }
     while (a < b) {
         int m = (a + b) / 2;
         if (d[m].e < e - 1.0f) {
@@ -1253,7 +1292,8 @@ static float meet(int axis, int side, float e, float l, float lo, float hi, floa
             if ((side ? d[a].e > e : d[a].e < e) && floorf(d[a].e + 0.5f) != floorf(e + 0.5f)) {
                 continue;
             }
-            m = d[a].lattice ? floorf(d[a].e * k + (0.5f - 1.0f / 64)) / k : floorf(d[a].e + 0.5f);
+            m = !d[a].lattice ? floorf(d[a].e + 0.5f) : shared ? ceilf(d[a].e * k - 0.5f) / k
+                                                          : floorf(d[a].e * k + (0.5f - 1.0f / 64)) / k;
             if (side ? m > l && (to == l || m < to) : m < l && (to == l || m > to)) {
                 to = m;
             }
@@ -1266,11 +1306,644 @@ static int gcd(int a, int b) {
     return b == 0 ? a : gcd(b, a % b);
 }
 
+/* The translucent list drawn a triangle at a time far to near, blended by the GPU, in an order that keeps each
+   pixel's fragments as peeling sorts them (by 1/w, then the list's order). Triangles whose 1/w cross where they
+   overlap, and those caught between them, are peeled together (batches[RD_TRANS]); the rest are drawn before or
+   after them */
+typedef struct {
+    int first, count, state;    /* its vertices */
+    float x0, y0, x1, y1;       /* its box on the screen, in the game's pixels */
+    float qlo, qhi;             /* its 1/w */
+    double pa, pb, pc;          /* 1/w = pa x + pb y + pc */
+    double vx[3], vy[3];
+    int block;                  /* the front in the game's pixels: whole game pixels, past its edges */
+    int adds;                   /* added to the frame, by a factor of its own: in any order with others that add */
+} TREC;
+
+typedef struct {
+    int* v;
+    int n, max;
+} IVEC;
+
+#define BIN 16
+#define BINS_X (RD_WIDTH / BIN)
+#define BINS_Y (RD_HEIGHT / BIN)
+
+static TREC* trec;
+static GVTX* tverts;        /* the translucent list's vertices, to be put in order */
+static int ntverts, maxtverts;
+static int ntrec, maxtrec, sort_failed;
+/* a run of the translucent list: sorted batches, or a group of batches[RD_TRANS] peeled within box */
+typedef struct {
+    int peel, from, to;
+    SDL_Rect box;           /* in the frame's pixels */
+} STEP;
+static STEP* steps;
+static int nsteps, maxsteps;
+static BATCH* sorted;
+static int nsorted, maxsorted;
+static const BATCH* peel_b; /* the group being peeled */
+static int npeel_b;
+static SDL_Rect peel_box;
+static IVEC flats, bin_at, bin_list, apart_at, apart_list, seq, eu, ev, out_at, out, mark, low, stk, call, heap, comp, size, grp_at, grp, level, unit, tmp;
+
+static void ipush(IVEC* a, int x) {
+    if (a->n == a->max) {
+        int m = a->max ? a->max * 2 : 1024;
+        int* p = realloc(a->v, (size_t)m * sizeof *p);
+        if (p == NULL) {
+            sort_failed = 1;
+            return;
+        }
+        a->v = p, a->max = m;
+    }
+    a->v[a->n++] = x;
+}
+
+/* a holding n */
+static int isize(IVEC* a, int n) {
+    if (n > a->max) {
+        int* p = realloc(a->v, (size_t)n * sizeof *p);
+        if (p == NULL) {
+            sort_failed = 1;
+            a->n = 0;
+            return 0;
+        }
+        a->v = p, a->max = n;
+    }
+    a->n = n;
+    return 1;
+}
+
+/* joined to the last batch where it can be, from batch from on */
+static void push_batch(BATCH** list, int* n, int* max, int from, int first, int count, int state) {
+    BATCH* b;
+    if (*n > from && (*list)[*n - 1].state == state && (*list)[*n - 1].first + (*list)[*n - 1].count == first) {
+        (*list)[*n - 1].count += count;
+        return;
+    }
+    if (*n == *max) {
+        int m = *max ? *max * 2 : 1024;
+        BATCH* p = realloc(*list, (size_t)m * sizeof *p);
+        if (p == NULL) {
+            sort_failed = 1;
+            return;
+        }
+        *list = p, *max = m;
+    }
+    b = &(*list)[(*n)++];
+    b->first = first, b->count = count, b->state = state;
+}
+
+static void add_record(const RD_TRI* t, int first, int count, int block) {
+    const RD_VTX *a = &t->v[0], *b = &t->v[1], *c = &t->v[2];
+    double area = edge(a->x, a->y, b->x, b->y, c->x, c->y);
+    double d1 = (double)b->z - a->z, d2 = (double)c->z - a->z;
+    TREC* r;
+    int j;
+    if (ntrec == maxtrec) {
+        int m = maxtrec ? maxtrec * 2 : 4096;
+        TREC* p = realloc(trec, (size_t)m * sizeof *p);
+        if (p == NULL) {
+            sort_failed = 1;
+            return;
+        }
+        trec = p, maxtrec = m;
+    }
+    r = &trec[ntrec++];
+    r->first = first, r->count = count, r->state = t->state, r->block = block;
+    r->adds = rd_frame->states[t->state].dst == RD_ONE && (rd_frame->states[t->state].src == RD_ZERO ||
+              rd_frame->states[t->state].src == RD_ONE || rd_frame->states[t->state].src == RD_SRC_ALPHA ||
+              rd_frame->states[t->state].src == RD_INV_SRC_ALPHA);
+    r->x0 = fmaxf(min3(a->x, b->x, c->x) - block, 0), r->x1 = fminf(max3(a->x, b->x, c->x) + block, RD_WIDTH);
+    r->y0 = fmaxf(min3(a->y, b->y, c->y) - block, 0), r->y1 = fminf(max3(a->y, b->y, c->y) + block, RD_HEIGHT);
+    r->qlo = min3(a->z, b->z, c->z), r->qhi = max3(a->z, b->z, c->z);
+    r->pa = (d1 * ((double)c->y - a->y) - d2 * ((double)b->y - a->y)) / area;
+    r->pb = (d2 * ((double)b->x - a->x) - d1 * ((double)c->x - a->x)) / area;
+    r->pc = a->z - r->pa * a->x - r->pb * a->y;
+    for (j = 0; j < 3; j++) {
+        r->vx[j] = t->v[j].x, r->vy[j] = t->v[j].y;
+    }
+}
+
+/* a's triangle cut to b's: its corners in x and y, or 0 where they share no area */
+static int overlap(const TREC* a, const TREC* b, double* x, double* y) {
+    double ox[12], oy[12], area = 0;
+    double sign = edge(b->vx[0], b->vy[0], b->vx[1], b->vy[1], b->vx[2], b->vy[2]) > 0 ? 1 : -1;
+    int n = 3, i, e;
+    for (i = 0; i < 3; i++) {
+        x[i] = a->vx[i], y[i] = a->vy[i];
+    }
+    for (e = 0; e < 3 && n >= 3; e++) {
+        double ax = b->vx[e], ay = b->vy[e], bx = b->vx[(e + 1) % 3], by = b->vy[(e + 1) % 3];
+        int m = 0;
+        memcpy(ox, x, (size_t)n * sizeof *x), memcpy(oy, y, (size_t)n * sizeof *y);
+        for (i = 0; i < n; i++) {
+            int j = (i + 1) % n;
+            double di = sign * edge(ax, ay, bx, by, ox[i], oy[i]), dj = sign * edge(ax, ay, bx, by, ox[j], oy[j]);
+            if (di >= 0) {
+                x[m] = ox[i], y[m++] = oy[i];
+            }
+            if ((di < 0 && dj > 0) || (di > 0 && dj < 0)) {
+                double f = di / (di - dj);
+                x[m] = ox[i] + (ox[j] - ox[i]) * f, y[m++] = oy[i] + (oy[j] - oy[i]) * f;
+            }
+        }
+        n = m;
+    }
+    for (i = 0; i < n; i++) {
+        area += x[i] * y[(i + 1) % n] - x[(i + 1) % n] * y[i];
+    }
+    return n >= 3 && fabs(area) >= 1e-6 ? n : 0;
+}
+
+/* where a and b overlap: 1 a nearer at every pixel, -1 b nearer, 2 neither, 0 they don't overlap */
+static int compare(const TREC* a, const TREC* b) {
+    double tol = 1e-5 * fmax(fabs(a->qhi), fabs(b->qhi)), x[12], y[12];
+    int i, n, near = 0, far = 0;
+    if ((a->adds && b->adds) || !(a->x0 < b->x1 && b->x0 < a->x1 && a->y0 < b->y1 && b->y0 < a->y1)) {
+        return 0;
+    }
+    if (a->qlo > b->qhi + tol) {
+        return 1;
+    }
+    if (b->qlo > a->qhi + tol) {
+        return -1;
+    }
+    if (a->block || b->block) {
+        return 2;
+    }
+    n = overlap(a, b, x, y);
+    for (i = 0; i < n; i++) {
+        double d = (a->pa - b->pa) * x[i] + (a->pb - b->pb) * y[i] + (a->pc - b->pc);
+        near += d > tol, far += d < -tol;
+    }
+    return n == 0 ? 0 : near == n ? 1 : far == n ? -1 : 2;
+}
+
+static int flat_order(const void* pa, const void* pb) {
+    int a = *(const int*)pa, b = *(const int*)pb;
+    return trec[a].qlo < trec[b].qlo ? -1 : trec[a].qlo > trec[b].qlo ? 1 : a - b;
+}
+
+static int flat(int r) {
+    return trec[r].qlo == trec[r].qhi;
+}
+
+static void bins_of(const TREC* r, int* bx0, int* by0, int* bx1, int* by1) {
+    int x0 = (int)(r->x0 / BIN), x1 = (int)(r->x1 / BIN), y0 = (int)(r->y0 / BIN), y1 = (int)(r->y1 / BIN);
+    *bx0 = x0 < 0 ? 0 : x0 >= BINS_X ? BINS_X - 1 : x0;
+    *bx1 = x1 < *bx0 ? *bx0 : x1 >= BINS_X ? BINS_X - 1 : x1;
+    *by0 = y0 < 0 ? 0 : y0 >= BINS_Y ? BINS_Y - 1 : y0;
+    *by1 = y1 < *by0 ? *by0 : y1 >= BINS_Y ? BINS_Y - 1 : y1;
+}
+
+/* the edges from -> to as lists: node i's from at[i] */
+static void adjacency(IVEC* at, IVEC* list, const IVEC* from, const IVEC* to, int m) {
+    int i;
+    if (!isize(at, m + 1) || !isize(list, from->n)) {
+        return;
+    }
+    memset(at->v, 0, (size_t)(m + 1) * sizeof *at->v);
+    for (i = 0; i < from->n; i++) {
+        at->v[from->v[i] + 1]++;
+    }
+    for (i = 0; i < m; i++) {
+        at->v[i + 1] += at->v[i];
+    }
+    for (i = 0; i < from->n; i++) {
+        list->v[at->v[from->v[i]]++] = to->v[i];
+    }
+    for (i = m; i > 0; i--) {
+        at->v[i] = at->v[i - 1];
+    }
+    at->v[0] = 0;
+}
+
+/* the records in each bin, from at.v[bin]: the flat ones far to near, then the sloped ones; with apart, only those
+   that don't add to the frame */
+static int bin_up(IVEC* at, IVEC* list, int apart) {
+    int nbins = BINS_X * BINS_Y, i, j, b, bx0, by0, bx1, by1, pass;
+    if (!isize(at, nbins + 1) || !isize(&tmp, nbins)) {
+        return 0;
+    }
+    memset(at->v, 0, (size_t)(nbins + 1) * sizeof *at->v);
+    for (pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            for (b = 0; b < nbins; b++) {
+                at->v[b + 1] += at->v[b];
+            }
+            if (!isize(list, at->v[nbins])) {
+                return 0;
+            }
+            memcpy(tmp.v, at->v, (size_t)nbins * sizeof *tmp.v);
+        }
+        for (i = 0; i < flats.n + ntrec; i++) {
+            int r = i < flats.n ? flats.v[i] : i - flats.n;
+            if ((i >= flats.n && flat(r)) || (apart && trec[r].adds)) {
+                continue;
+            }
+            bins_of(&trec[r], &bx0, &by0, &bx1, &by1);
+            for (b = by0; b <= by1; b++) {
+                for (j = bx0; j <= bx1; j++) {
+                    if (pass == 0) {
+                        at->v[b * BINS_X + j + 1]++;
+                    } else {
+                        list->v[tmp.v[b * BINS_X + j]++] = r;
+                    }
+                }
+            }
+        }
+    }
+    return 1;
+}
+
+/* each pair that overlaps in a bin ordered: the flat ones far to near (1/w, then the list's order), and each sloped
+   one against every other it shares a bin with (that doesn't add, if it adds), both ways where neither is nearer
+   throughout */
+static int pair_up(void) {
+    int m = ntrec, nbins = BINS_X * BINS_Y, i, j, b, k, bx0, by0, bx1, by1;
+    eu.n = ev.n = flats.n = 0;
+    for (i = 0; i < m; i++) {
+        if (flat(i)) {
+            ipush(&flats, i);
+        }
+    }
+    if (sort_failed || !isize(&mark, m)) {
+        return 0;
+    }
+    qsort(flats.v, (size_t)flats.n, sizeof *flats.v, flat_order);
+    if (!bin_up(&bin_at, &bin_list, 0) || !bin_up(&apart_at, &apart_list, 1)) {
+        return 0;
+    }
+    for (b = 0; b < nbins; b++) {
+        for (k = bin_at.v[b]; k + 1 < bin_at.v[b + 1] && flat(bin_list.v[k + 1]); k++) {
+            ipush(&eu, bin_list.v[k]), ipush(&ev, bin_list.v[k + 1]);
+        }
+    }
+    for (i = 0; i < m; i++) {
+        mark.v[i] = -1;
+    }
+    for (i = 0; i < m; i++) {
+        const IVEC *at = trec[i].adds ? &apart_at : &bin_at, *list = trec[i].adds ? &apart_list : &bin_list;
+        if (flat(i)) {
+            continue;
+        }
+        bins_of(&trec[i], &bx0, &by0, &bx1, &by1);
+        for (b = by0; b <= by1; b++) {
+            for (j = bx0; j <= bx1; j++) {
+                for (k = at->v[b * BINS_X + j]; k < at->v[b * BINS_X + j + 1]; k++) {
+                    int o = list->v[k], c;
+                    if (o == i || (!flat(o) && o < i) || mark.v[o] == i) {
+                        continue;
+                    }
+                    mark.v[o] = i;
+                    c = compare(&trec[i], &trec[o]);
+                    if (c == 1 || c == 2) {
+                        ipush(&eu, o), ipush(&ev, i);
+                    }
+                    if (c == -1 || c == 2) {
+                        ipush(&eu, i), ipush(&ev, o);
+                    }
+                }
+            }
+        }
+    }
+    if (sort_failed) {
+        return 0;
+    }
+    adjacency(&out_at, &out, &eu, &ev, m);
+    return !sort_failed;
+}
+
+/* the strongly connected records (Tarjan's): comp.v[i], numbered as found, so one reached from another has the lower
+   number; size.v its records. How many */
+static int components(void) {
+    int m = ntrec, i, n = 0, nc = 0;
+    if (!isize(&low, m) || !isize(&comp, m) || !isize(&size, 0)) {
+        return 0;
+    }
+    for (i = 0; i < m; i++) {
+        mark.v[i] = -1;     /* its visit */
+    }
+    stk.n = 0;
+    for (i = 0; i < m && !sort_failed; i++) {
+        if (mark.v[i] >= 0) {
+            continue;
+        }
+        call.n = 0;
+        mark.v[i] = low.v[i] = n++;
+        ipush(&stk, i), ipush(&call, i), ipush(&call, out_at.v[i]);
+        while (call.n > 0 && !sort_failed) {
+            int v = call.v[call.n - 2], e = call.v[call.n - 1];
+            if (e < out_at.v[v + 1]) {
+                int w = out.v[e];
+                call.v[call.n - 1]++;
+                if (mark.v[w] < 0) {
+                    mark.v[w] = low.v[w] = n++;
+                    ipush(&stk, w), ipush(&call, w), ipush(&call, out_at.v[w]);
+                } else if (low.v[w] >= 0 && mark.v[w] < low.v[v]) {
+                    low.v[v] = mark.v[w];   /* still on the stack */
+                }
+                continue;
+            }
+            call.n -= 2;
+            if (low.v[v] == mark.v[v]) {
+                int k = 0, w;
+                do {
+                    w = stk.v[--stk.n];
+                    low.v[w] = -1;          /* done */
+                    comp.v[w] = nc;
+                    k++;
+                } while (w != v);
+                ipush(&size, k);
+                nc++;
+            } else if (low.v[v] < low.v[call.v[call.n - 2]]) {
+                low.v[call.v[call.n - 2]] = low.v[v];
+            }
+        }
+    }
+    return sort_failed ? 0 : nc;
+}
+
+/* members.v from at.v[k]: the records whose key.v is k, in the list's order */
+static void members(IVEC* at, IVEC* list, const IVEC* key, int nk) {
+    int i;
+    if (!isize(at, nk + 1) || !isize(list, key->n)) {
+        return;
+    }
+    memset(at->v, 0, (size_t)(nk + 1) * sizeof *at->v);
+    for (i = 0; i < key->n; i++) {
+        if (key->v[i] >= 0) {
+            at->v[key->v[i] + 1]++;
+        }
+    }
+    for (i = 0; i < nk; i++) {
+        at->v[i + 1] += at->v[i];
+    }
+    for (i = 0; i < key->n; i++) {
+        if (key->v[i] >= 0) {
+            list->v[at->v[key->v[i]]++] = i;
+        }
+    }
+    for (i = nk; i > 0; i--) {
+        at->v[i] = at->v[i - 1];
+    }
+    at->v[0] = 0;
+}
+
+/* each record's unit.v: itself, or m + its group: the tangled components that no path joins are peeled together,
+   numbered by the tangled ones on the longest path to them. How many groups */
+static int groups(int nc) {
+    int m = ntrec, c, i, e, ng = 0;
+    members(&grp_at, &grp, &comp, nc);
+    if (sort_failed || !isize(&level, nc) || !isize(&unit, m)) {
+        return 0;
+    }
+    memset(level.v, 0, (size_t)nc * sizeof *level.v);
+    for (c = nc - 1; c >= 0; c--) {
+        for (i = grp_at.v[c]; i < grp_at.v[c + 1]; i++) {
+            int v = grp.v[i];
+            for (e = out_at.v[v]; e < out_at.v[v + 1]; e++) {
+                int cw = comp.v[out.v[e]], l = level.v[c] + (size.v[c] > 1);
+                if (cw != c && l > level.v[cw]) {
+                    level.v[cw] = l;
+                }
+            }
+        }
+    }
+    for (i = 0; i < m; i++) {
+        c = comp.v[i];
+        unit.v[i] = size.v[c] > 1 ? m + level.v[c] : i;
+        if (size.v[c] > 1 && level.v[c] + 1 > ng) {
+            ng = level.v[c] + 1;
+        }
+    }
+    return ng;
+}
+
+/* the heap's key: a record's place in the list; a group's, its first record's */
+static int heap_key(int u) {
+    return u < ntrec ? u : grp.v[grp_at.v[u - ntrec]];
+}
+
+static void heap_push(int u) {
+    int i;
+    ipush(&heap, u);
+    for (i = heap.n - 1; i > 0 && heap_key(heap.v[(i - 1) / 2]) > heap_key(heap.v[i]); i = (i - 1) / 2) {
+        int t = heap.v[i];
+        heap.v[i] = heap.v[(i - 1) / 2], heap.v[(i - 1) / 2] = t;
+    }
+}
+
+static int heap_pop(void) {
+    int top = heap.v[0], i = 0;
+    heap.v[0] = heap.v[--heap.n];
+    for (;;) {
+        int l = 2 * i + 1, r = l + 1, s = i, t;
+        if (l < heap.n && heap_key(heap.v[l]) < heap_key(heap.v[s])) {
+            s = l;
+        }
+        if (r < heap.n && heap_key(heap.v[r]) < heap_key(heap.v[s])) {
+            s = r;
+        }
+        if (s == i) {
+            return top;
+        }
+        t = heap.v[i], heap.v[i] = heap.v[s], heap.v[s] = t, i = s;
+    }
+}
+
+static void add_step(int peel, int from, int to, const SDL_Rect* box) {
+    if (nsteps > 0 && !peel && !steps[nsteps - 1].peel) {
+        steps[nsteps - 1].to = to;
+        return;
+    }
+    if (nsteps == maxsteps) {
+        int m = maxsteps ? maxsteps * 2 : 64;
+        STEP* p = realloc(steps, (size_t)m * sizeof *p);
+        if (p == NULL) {
+            sort_failed = 1;
+            return;
+        }
+        steps = p, maxsteps = m;
+    }
+    steps[nsteps].peel = peel, steps[nsteps].from = from, steps[nsteps].to = to;
+    steps[nsteps++].box = *box;
+}
+
+static void copy_record(const TREC* r, int* n, BATCH** list, int* nb, int* max, int from) {
+    memcpy(&verts[*n], &tverts[r->first], (size_t)r->count * sizeof(GVTX));
+    push_batch(list, nb, max, from, *n, r->count, r->state);
+    *n += r->count;
+}
+
+/* the units in order (Kahn's, the list's own where free): seq.v, a record or m + a group. Whether all */
+static int order_units(void) {
+    int m = ntrec, nc, ng, i, e, u, units = 0;
+    if (m == 0 || !pair_up() || (nc = components()) == 0) {
+        return 0;
+    }
+    ng = groups(nc);
+    /* the groups' records, and how many units wait on each */
+    if (sort_failed || !isize(&tmp, m)) {
+        return 0;
+    }
+    for (i = 0; i < m; i++) {
+        tmp.v[i] = unit.v[i] >= m ? unit.v[i] - m : -1;
+    }
+    members(&grp_at, &grp, &tmp, ng);
+    if (sort_failed || !isize(&low, m + ng) || !isize(&seq, 0)) {
+        return 0;
+    }
+    memset(low.v, 0, (size_t)(m + ng) * sizeof *low.v);
+    for (i = 0; i < eu.n; i++) {
+        int a = unit.v[eu.v[i]], b = unit.v[ev.v[i]];
+        low.v[b] += a != b;
+    }
+    heap.n = 0;
+    for (u = 0; u < m + ng; u++) {
+        int real = u < m ? unit.v[u] == u : grp_at.v[u - m + 1] > grp_at.v[u - m];
+        units += real;
+        if (real && low.v[u] == 0) {
+            heap_push(u);
+        }
+    }
+    while (heap.n > 0 && !sort_failed) {
+        int g = heap_pop(), k, from = g < m ? 0 : grp_at.v[g - m], to = g < m ? 1 : grp_at.v[g - m + 1];
+        ipush(&seq, g);
+        for (k = from; k < to; k++) {
+            int v = g < m ? g : grp.v[k];
+            for (e = out_at.v[v]; e < out_at.v[v + 1]; e++) {
+                int w = unit.v[out.v[e]];
+                if (w != g && --low.v[w] == 0) {
+                    heap_push(w);
+                }
+            }
+        }
+    }
+    return !sort_failed && seq.n == units;
+}
+
+/* a box in the frame's pixels around game pixels x0..x1, y0..y1, a game pixel more each side for the front's whole
+   game pixels */
+static SDL_Rect frame_box(float x0, float y0, float x1, float y1) {
+    float sx = (float)frame_w / RD_WIDTH, sy = (float)frame_h / RD_HEIGHT;
+    int px0 = (int)floorf((x0 - 1) * sx), py0 = (int)floorf((y0 - 1) * sy);
+    int px1 = (int)ceilf((x1 + 1) * sx), py1 = (int)ceilf((y1 + 1) * sy);
+    SDL_Rect box;
+    px0 = px0 < 0 ? 0 : px0, py0 = py0 < 0 ? 0 : py0;
+    px1 = px1 > frame_w ? frame_w : px1, py1 = py1 > frame_h ? frame_h : py1;
+    box.x = px0, box.y = py0, box.w = px1 > px0 ? px1 - px0 : 0, box.h = py1 > py0 ? py1 - py0 : 0;
+    return box;
+}
+
+static int peel_layers(void) {
+    return layers_env ? layers_env : rd_q.nosort ? 4 : 12;
+}
+
+/* records gathered for a peel: their box, and the most of them over a bin (the layers it likely needs) */
+typedef struct {
+    float x0, y0, x1, y1;
+    int most;
+    int n[BINS_X * BINS_Y];
+} GATHER;
+static GATHER run_g, unit_g;
+
+static void gather_clear(GATHER* g) {
+    g->x0 = RD_WIDTH, g->y0 = RD_HEIGHT, g->x1 = g->y1 = 0, g->most = 0;
+    memset(g->n, 0, sizeof g->n);
+}
+
+static void gather(GATHER* g, int u) {
+    int m = ntrec, k, x, y, bx0, by0, bx1, by1;
+    int from = u < m ? 0 : grp_at.v[u - m], to = u < m ? 1 : grp_at.v[u - m + 1];
+    for (k = from; k < to; k++) {
+        const TREC* r = &trec[u < m ? u : grp.v[k]];
+        g->x0 = fminf(g->x0, r->x0), g->y0 = fminf(g->y0, r->y0), g->x1 = fmaxf(g->x1, r->x1), g->y1 = fmaxf(g->y1, r->y1);
+        bins_of(r, &bx0, &by0, &bx1, &by1);
+        for (y = by0; y <= by1; y++) {
+            for (x = bx0; x <= bx1; x++) {
+                int c = ++g->n[y * BINS_X + x];
+                g->most = c > g->most ? c : g->most;
+            }
+        }
+    }
+}
+
+/* about what peeling them costs, a layer of the screen's pixels a unit; each peel's own passes about two */
+static double gather_cost(const GATHER* g) {
+    double area = g->x1 > g->x0 && g->y1 > g->y0 ? ((double)g->x1 - g->x0) * ((double)g->y1 - g->y0) : 0;
+    int layers = peel_layers();
+    return area / (RD_WIDTH * RD_HEIGHT) * (g->most < layers ? g->most : layers) + 2;
+}
+
+/* the translucent list's vertices from n, in order: steps of sorted batches and of groups to peel (batches[RD_TRANS]);
+   all peeled if it can't be ordered. The order from one group to the next is peeled as one where that costs less */
+static int sort_trans(int n) {
+    int m = ntrec, i, j, k;
+    nsteps = nsorted = nbatches[RD_TRANS] = 0;
+    if (sort_failed || !order_units()) {
+        for (i = 0; i < m; i++) {
+            copy_record(&trec[i], &n, &batches[RD_TRANS], &nbatches[RD_TRANS], &maxbatches[RD_TRANS], 0);
+        }
+        return n;
+    }
+    for (i = 0; i < seq.n;) {
+        int end, first;
+        double cost;
+        SDL_Rect box;
+        if (seq.v[i] < m) {
+            SDL_Rect none = { 0, 0, 0, 0 };
+            first = nsorted;
+            copy_record(&trec[seq.v[i]], &n, &sorted, &nsorted, &maxsorted, 0);
+            add_step(0, first, nsorted, &none);
+            i++;
+            continue;
+        }
+        gather_clear(&run_g);
+        gather(&run_g, seq.v[i]);
+        cost = gather_cost(&run_g);
+        for (end = j = i + 1; j < seq.n; j++) {
+            GATHER* g = &unit_g;
+            double merged;
+            if (seq.v[j] < m) {
+                continue;
+            }
+            /* the run and the units up to this group, against the two apart */
+            gather_clear(g);
+            gather(g, seq.v[j]);
+            merged = gather_cost(g);
+            memcpy(g, &run_g, sizeof *g);
+            for (k = end; k <= j; k++) {
+                gather(g, seq.v[k]);
+            }
+            if (gather_cost(g) > cost + merged) {
+                break;
+            }
+            memcpy(&run_g, g, sizeof *g);
+            cost = gather_cost(g), end = j + 1;
+        }
+        first = nbatches[RD_TRANS];
+        for (; i < end; i++) {
+            int g = seq.v[i], from = g < m ? 0 : grp_at.v[g - m], to = g < m ? 1 : grp_at.v[g - m + 1];
+            for (k = from; k < to; k++) {
+                copy_record(&trec[g < m ? g : grp.v[k]], &n, &batches[RD_TRANS], &nbatches[RD_TRANS],
+                            &maxbatches[RD_TRANS], first);
+            }
+        }
+        box = frame_box(run_g.x0, run_g.y0, run_g.x1, run_g.y1);
+        add_step(1, first, nbatches[RD_TRANS], &box);
+    }
+    return n;
+}
+
 /* the background's 6 vertices, then each list's triangles; how many */
 static int build(float* zscale) {
     int list, i, n = 6, lattice_x, lattice_y;
     float qmax = 0;
     int e;
+    ntrec = ntverts = nsteps = nsorted = sort_failed = 0;
     for (list = 0; list < RD_LISTS; list++) {
         for (i = 0; i < rd_frame->ntris[list]; i++) {
             const RD_TRI* t = &rd_frame->tris[list][i];
@@ -1291,6 +1964,15 @@ static int build(float* zscale) {
     *zscale = ldexpf(1.0f, -e);          /* a power of two: 1/w scaled exactly below 1 */
     for (list = 0; list < RD_LISTS; list++) {
         n += rd_frame->ntris[list] * (exact_edges ? 3 * (MAX_CORNERS - 2) : 3);
+    }
+    sorting = sort_on;
+    if (sorting && rd_frame->ntris[RD_TRANS] * (exact_edges ? 3 * (MAX_CORNERS - 2) : 3) > maxtverts) {
+        int m = rd_frame->ntris[RD_TRANS] * (exact_edges ? 3 * (MAX_CORNERS - 2) : 3) * 2;
+        GVTX* p = realloc(tverts, (size_t)m * sizeof *p);
+        if (p != NULL) {
+            tverts = p, maxtverts = m;
+        }
+        sorting = p != NULL;
     }
     if ((uint32_t)n > vcap) {
         SDL_GPUBufferCreateInfo bi = { SDL_GPU_BUFFERUSAGE_VERTEX, (Uint32)(n * sizeof(GVTX)), 0 };
@@ -1371,7 +2053,8 @@ static int build(float* zscale) {
                             if (j == 0) {
                                 move_x = lx - t->v[0].x, move_y = ly - t->v[0].y;
                             }
-                            x = lx, y = ly;
+                            x = meet(0, t->v[j].x == hx, t->v[j].x, lx, ly0, hy, 0.6f, 1);
+                            y = meet(1, t->v[j].y == hy, t->v[j].y, ly, lx0, hx, 7.0f / 15, 1);
                         } else if (lattice) {
                             /* its texels from where the game put them onto the pixels their corners can fall on
                                (whole ones at 2688 by 2016, sevenths down at 1920 by 1440): the sprite's texels all
@@ -1382,8 +2065,8 @@ static int build(float* zscale) {
                             if (j == 0) {
                                 move_x = lx - t->v[0].x, move_y = ly - t->v[0].y;
                             }
-                            x = meet(0, t->v[j].x == hx, t->v[j].x, lx, ly0, hy, kx);
-                            y = meet(1, t->v[j].y == hy, t->v[j].y, ly, lx0, hx, ky);
+                            x = meet(0, t->v[j].x == hx, t->v[j].x, lx, ly0, hy, kx, 0);
+                            y = meet(1, t->v[j].y == hy, t->v[j].y, ly, lx0, hx, ky, 0);
                         } else {
                             x = floorf(x + 0.5f), y = floorf(y + 0.5f);
                         }
@@ -1433,12 +2116,27 @@ static int build(float* zscale) {
                     memcpy(g[j].uvb, fitted ? fb : b, sizeof b);
                 }
             }
+            if (list == RD_TRANS && sorting) {
+                k = put_triangle(&tverts[ntverts], g, t, blocks ? BLOCK_MARGIN : EDGE_MARGIN);
+                if (k > 0) {
+                    add_record(t, ntverts, k, blocks);
+                    ntverts += k;
+                }
+                continue;
+            }
             k = put_triangle(&verts[n], g, t, blocks ? BLOCK_MARGIN : EDGE_MARGIN);
             if (k > 0) {
                 add_batch(list, n, k, t->state);
                 n += k;
             }
         }
+    }
+    if (sorting) {
+        n = sort_trans(n);
+    }
+    if (nsteps == 0 && nbatches[RD_TRANS] > 0) {
+        SDL_Rect all = { 0, 0, frame_w, frame_h };
+        add_step(1, 0, nbatches[RD_TRANS], &all);
     }
     SDL_UnmapGPUTransferBuffer(dev, vtrans);
     return n;
@@ -1495,8 +2193,8 @@ static void bind_textures(SDL_GPURenderPass* rp, SDL_GPUTexture* tex, SDL_GPUTex
    or -1 */
 static void draw_whole(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* rp, int kind, int mode,
                        SDL_GPUTexture* const* keys, int row) {
-    const BATCH* first = &batches[RD_TRANS][0];
-    const BATCH* last = &batches[RD_TRANS][nbatches[RD_TRANS] - 1];
+    const BATCH* first = &peel_b[0];
+    const BATCH* last = &peel_b[npeel_b - 1];
     SDL_GPUGraphicsPipeline* p = pipeline(kind, 0, 0);
     DRAW d;
     if (p == NULL) {
@@ -1515,19 +2213,20 @@ static void draw_whole(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* rp, int kin
 }
 
 /* row: the first batch's draw in args_buf, or -1 */
-static void draw_list(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* rp, int list, int kind, int mode,
-                      SDL_GPUTexture* const* keys, int row) {
+static void draw_batches(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* rp, const BATCH* batch, int nb, int list, int kind,
+                         int mode, SDL_GPUTexture* const* keys, int row) {
     int i;
     SDL_GPUGraphicsPipeline* bound = NULL;
-    for (i = 0; i < nbatches[list]; i++) {
-        const BATCH* b = &batches[list][i];
+    for (i = 0; i < nb; i++) {
+        const BATCH* b = &batch[i];
         const RD_STATE* s = &rd_frame->states[b->state];
         SDL_GPUGraphicsPipeline* p;
         DRAW d;
         if (kind == P_OPAQUE) {
             p = pipeline(P_OPAQUE, s->depth, s->zwrite);
         } else {
-            p = pipeline(kind, kind == P_PUNCH ? s->src : 0, kind == P_PUNCH ? s->dst : 0);
+            int blended = kind == P_PUNCH || kind == P_SORTED;
+            p = pipeline(kind, blended ? s->src : 0, blended ? s->dst : 0);
         }
         if (p == NULL) {
             continue;
@@ -1547,9 +2246,14 @@ static void draw_list(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* rp, int list
     }
 }
 
+static void draw_list(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* rp, int list, int kind, int mode,
+                      SDL_GPUTexture* const* keys, int row) {
+    draw_batches(cmd, rp, batches[list], nbatches[list], list, kind, mode, keys, row);
+}
+
 /* room for a frame of nb translucent batches over up to layers layers; 0 when there is none */
 static int count_room(int nb, int layers) {
-    uint32_t d = (uint32_t)nb + 1, a = (uint32_t)layers * (uint32_t)(nb + 2);
+    uint32_t d = (uint32_t)nb + 1, a = (uint32_t)layers * (uint32_t)(nb + 4);
     if (d > draws_cap) {
         SDL_GPUBufferCreateInfo bi = { SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ, 0, 0 };
         SDL_GPUTransferBufferCreateInfo ti = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, 0, 0 };
@@ -1585,8 +2289,8 @@ static int count_room(int nb, int layers) {
 /* the frame's translucent draws for the counts: the most fragments' slot zeroed, then the keys' draw and the
    batches' */
 static void count_upload(SDL_GPUCopyPass* copy) {
-    const BATCH* b = batches[RD_TRANS];
-    int i, nb = nbatches[RD_TRANS];
+    const BATCH* b = peel_b;
+    int i, nb = npeel_b;
     uint32_t* d = SDL_MapGPUTransferBuffer(dev, draws_trans, true);
     d[0] = d[1] = 0;
     d[2] = (uint32_t)b[0].first, d[3] = (uint32_t)(b[nb - 1].first + b[nb - 1].count - b[0].first);
@@ -1633,7 +2337,11 @@ static void count_layers(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* rp, int l
     SDL_EndGPUComputePass(cp);
 }
 
-static SDL_GPURenderPass* begin(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* color, int clear, float value, int clear_depth) {
+static int scissor_on;      /* the passes cut to peel_box */
+
+enum { CLEAR_DEPTH = 1, CLEAR_STENCIL = 2 };
+
+static SDL_GPURenderPass* begin(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* color, int clear, float value, int clears) {
     SDL_GPUColorTargetInfo ct;
     SDL_GPUDepthStencilTargetInfo dt;
     SDL_GPUBufferBinding vb;
@@ -1645,17 +2353,45 @@ static SDL_GPURenderPass* begin(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* color
     ct.clear_color.r = ct.clear_color.g = ct.clear_color.b = ct.clear_color.a = value;
     memset(&dt, 0, sizeof dt);
     dt.texture = depth_tex;
-    dt.load_op = clear_depth ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+    dt.load_op = clears & CLEAR_DEPTH ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
     dt.store_op = SDL_GPU_STOREOP_STORE;
-    dt.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
-    dt.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    dt.stencil_load_op = !stencil_on ? SDL_GPU_LOADOP_DONT_CARE : clears & CLEAR_STENCIL ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+    dt.stencil_store_op = stencil_on ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE;
     dt.clear_depth = 0.0f;
+    dt.clear_stencil = (Uint8)stencil_clear;
     rp = SDL_BeginGPURenderPass(cmd, &ct, 1, &dt);
+    if (scissor_on) {
+        SDL_SetGPUScissor(rp, &peel_box);
+    }
     memset(bound_tex, 0, sizeof bound_tex);
     vb.buffer = vbuf;
     vb.offset = 0;
     SDL_BindGPUVertexBuffers(rp, 0, &vb, 1);
     return rp;
+}
+
+/* the screen drawn where the stencil's count is over the layer (equal: is it): the key target set to value, or
+   from (P_COPY) copied; row: its draw in args_buf, or -1 */
+static void fill(SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* rp, int layer, int equal, float value, SDL_GPUTexture* from,
+                 int row) {
+    SDL_GPUGraphicsPipeline* p = from != NULL ? pipeline(P_COPY, equal, 0) : pipeline(P_FILL, 0, 0);
+    SDL_GPUTexture* keys[5] = { NULL, NULL, NULL, NULL, from };
+    DRAW d;
+    if (p == NULL) {
+        return;
+    }
+    SDL_BindGPUGraphicsPipeline(rp, p);
+    SDL_SetGPUStencilReference(rp, (Uint8)layer);
+    bind_textures(rp, NULL, keys);
+    memset(&d, 0, sizeof d);
+    d.mode = from != NULL ? 7 : 6;
+    d.mip_bias = value;
+    SDL_PushGPUFragmentUniformData(cmd, 0, &d, sizeof d);
+    if (row >= 0) {
+        SDL_DrawGPUPrimitivesIndirect(rp, args_buf, (Uint32)row * 16u, 1);
+    } else {
+        SDL_DrawGPUPrimitives(rp, 6, 1, 0, 0);
+    }
 }
 
 /* the frame, filtered to out_tex when the window is smaller */
@@ -1686,14 +2422,130 @@ static SDL_GPUTexture* finish(SDL_GPUCommandBuffer* cmd) {
     return out_tex;
 }
 
+/* a group of the translucent list (peel_b) peeled a layer at a time over the frame, far to near, within its box */
+static void peel(SDL_GPUCommandBuffer* cmd, const STEP* st, int layers) {
+    SDL_GPUCopyPass* copy;
+    SDL_GPURenderPass* rp;
+    int i, layer, f = 0, nb = st->to - st->from, entries = nb + 4;
+    int counting = count_on && count_tex != NULL && count_room(nb, layers), fills = counting && stencil_on;
+    peel_b = batches[RD_TRANS] + st->from, npeel_b = nb;
+    peel_box = st->box;
+    scissor_on = 1;
+    /* not counted: every pixel passes */
+    stencil_clear = counting ? 0 : 255;
+    if (counting) {
+        copy = SDL_BeginGPUCopyPass(cmd);
+        count_upload(copy);
+        SDL_EndGPUCopyPass(copy);
+    } else if (stencil_on) {
+        SDL_EndGPURenderPass(begin(cmd, frame_tex[0], 0, 0.0f, CLEAR_STENCIL));
+    }
+    if (!fills) {
+        SDL_GPUColorTargetInfo ct[2];
+        memset(ct, 0, sizeof ct);
+        for (i = 0; i < 2; i++) {
+            ct[i].texture = i == 0 ? key_q[1] : key_o[1];
+            ct[i].load_op = SDL_GPU_LOADOP_CLEAR;
+            ct[i].store_op = SDL_GPU_STOREOP_STORE;
+            ct[i].clear_color.r = -3.0e38f;
+        }
+        SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, ct, 2, NULL));
+    }
+    if (counting) {
+        SDL_GPUTextureLocation from, to;
+        count_layers(cmd, begin(cmd, count_tex, 1, 0.0f, CLEAR_STENCIL), layers, entries);
+        /* the frame copied once (where a layer draws): from then on each layer copies only the last layer's pixels */
+        if (fills) {
+            rp = begin(cmd, frame_tex[1], 0, 0.0f, 0);
+            fill(cmd, rp, 0, 0, 0.0f, frame_tex[0], -1);
+            SDL_EndGPURenderPass(rp);
+        } else {
+            copy = SDL_BeginGPUCopyPass(cmd);
+            memset(&from, 0, sizeof from);
+            memset(&to, 0, sizeof to);
+            from.texture = frame_tex[0], to.texture = frame_tex[1];
+            SDL_CopyGPUTextureToTexture(copy, &from, &to, (Uint32)frame_w, (Uint32)frame_h, 1, false);
+            SDL_EndGPUCopyPass(copy);
+        }
+    }
+    if (fills) {
+        for (i = 0; i < 2; i++) {
+            rp = begin(cmd, i == 0 ? key_q[1] : key_o[1], 0, 0.0f, 0);
+            fill(cmd, rp, 0, 0, -3.0e38f, NULL, -1);
+            SDL_EndGPURenderPass(rp);
+        }
+    }
+    for (layer = 0; layer < layers; layer++) {
+        int cur = layer & 1, last = cur ^ 1;
+        SDL_GPUTexture* keys[5] = { NULL };
+        /* the nearest 1/w past the last layer */
+        keys[0] = key_q[last], keys[1] = key_o[last];
+        rp = begin(cmd, key_q[cur], !fills, 3.0e38f, 0);
+        if (fills) {
+            fill(cmd, rp, layer, 0, 3.0e38f, NULL, layer * entries + 2);
+        }
+        draw_whole(cmd, rp, P_KEY, 1, keys, counting ? layer * entries : -1);
+        SDL_EndGPURenderPass(rp);
+        /* the first triangle at it */
+        keys[2] = key_q[cur];
+        rp = begin(cmd, key_o[cur], !fills, 3.0e38f, 0);
+        if (fills) {
+            fill(cmd, rp, layer, 0, 3.0e38f, NULL, layer * entries + 2);
+        }
+        draw_whole(cmd, rp, P_KEY, 2, keys, counting ? layer * entries : -1);
+        SDL_EndGPURenderPass(rp);
+        /* its fragment, blended by the shader over a copy of the frame */
+        if (!counting) {
+            SDL_GPUTextureLocation from, to;
+            copy = SDL_BeginGPUCopyPass(cmd);
+            memset(&from, 0, sizeof from);
+            memset(&to, 0, sizeof to);
+            from.texture = frame_tex[f], to.texture = frame_tex[f ^ 1];
+            SDL_CopyGPUTextureToTexture(copy, &from, &to, (Uint32)frame_w, (Uint32)frame_h, 1, false);
+            SDL_EndGPUCopyPass(copy);
+        }
+        keys[0] = keys[1] = NULL, keys[3] = key_o[cur], keys[4] = frame_tex[f];
+        f ^= 1;
+        rp = begin(cmd, frame_tex[f], 0, 0.0f, 0);
+        if (fills && layer > 0) {
+            /* the pixels the last layer was the last to change */
+            fill(cmd, rp, layer, 1, 0.0f, frame_tex[f ^ 1], layer * entries + 3);
+        } else if (counting && layer > 0) {
+            /* the copy's pixels the last layer changed */
+            SDL_GPUTexture* last_keys[5] = { key_q[last], key_o[last], NULL, NULL, frame_tex[f ^ 1] };
+            draw_whole(cmd, rp, P_FIX, 4, last_keys, layer * entries + 1);
+        }
+        if (fills) {
+            SDL_SetGPUStencilReference(rp, (Uint8)layer);
+        }
+        draw_batches(cmd, rp, peel_b, npeel_b, RD_TRANS, P_PEEL, 3, keys, counting ? layer * entries + 4 : -1);
+        SDL_EndGPURenderPass(rp);
+    }
+    if (f != 0 && fills) {
+        rp = begin(cmd, frame_tex[0], 0, 0.0f, 0);
+        fill(cmd, rp, 0, 0, 0.0f, frame_tex[1], -1);
+        SDL_EndGPURenderPass(rp);
+    } else if (f != 0) {
+        /* always the same texture, for the caller */
+        SDL_GPUTextureLocation from, to;
+        copy = SDL_BeginGPUCopyPass(cmd);
+        memset(&from, 0, sizeof from);
+        memset(&to, 0, sizeof to);
+        from.texture = frame_tex[1], to.texture = frame_tex[0];
+        SDL_CopyGPUTextureToTexture(copy, &from, &to, (Uint32)frame_w, (Uint32)frame_h, 1, false);
+        SDL_EndGPUCopyPass(copy);
+    }
+    scissor_on = 0;
+}
+
 SDL_GPUTexture* rd_gpu_end_frame(SDL_GPUCommandBuffer* cmd) {
     SDL_GPUCopyPass* copy;
     SDL_GPURenderPass* rp;
     FRAMEU fu;
     float zscale;
-    int n, i, layer, f = 0, counting, entries;
+    int n, i;
     /* the translucent layers peeled */
-    int layers = layers_env ? layers_env : rd_q.nosort ? 4 : 12;
+    int layers = peel_layers();
     frame_no++;
     if (frame_no % 60 == 0) {
         evict();
@@ -1704,12 +2556,7 @@ SDL_GPUTexture* rd_gpu_end_frame(SDL_GPUCommandBuffer* cmd) {
         const RD_TEXTURE* t = rd_frame->states[i].tex;
         state_tex[i] = t == NULL ? NULL : i > 0 && rd_frame->states[i - 1].tex == t ? state_tex[i - 1] : texture(t);
     }
-    entries = nbatches[RD_TRANS] + 2;
-    counting = count_on && count_tex != NULL && nbatches[RD_TRANS] > 0 && count_room(nbatches[RD_TRANS], layers);
     copy = SDL_BeginGPUCopyPass(cmd);
-    if (counting) {
-        count_upload(copy);
-    }
     {
         SDL_GPUTransferBufferLocation src = { vtrans, 0 };
         SDL_GPUBufferRegion dst = { vbuf, 0, (Uint32)(n * sizeof(GVTX)) };
@@ -1732,7 +2579,8 @@ SDL_GPUTexture* rd_gpu_end_frame(SDL_GPUCommandBuffer* cmd) {
     fu.sprite_mode = sprite_mode;
     SDL_PushGPUFragmentUniformData(cmd, 1, &fu, sizeof fu);
 
-    rp = begin(cmd, frame_tex[0], 1, 0.0f, 1);
+    stencil_clear = 0;
+    rp = begin(cmd, frame_tex[0], 1, 0.0f, CLEAR_DEPTH | CLEAR_STENCIL);
     {
         SDL_GPUGraphicsPipeline* p = pipeline(P_BACKGROUND, 0, 0);
         DRAW d;
@@ -1747,77 +2595,23 @@ SDL_GPUTexture* rd_gpu_end_frame(SDL_GPUCommandBuffer* cmd) {
     }
     draw_list(cmd, rp, RD_OPAQUE, P_OPAQUE, 0, NULL, -1);
     draw_list(cmd, rp, RD_PUNCH, P_PUNCH, 0, NULL, -1);
-    SDL_EndGPURenderPass(rp);
-
-    if (nbatches[RD_TRANS] == 0) {
-        return finish(cmd);
-    }
-    /* the translucent list, far to near */
-    {
-        SDL_GPUColorTargetInfo ct[2];
-        memset(ct, 0, sizeof ct);
-        for (i = 0; i < 2; i++) {
-            ct[i].texture = i == 0 ? key_q[1] : key_o[1];
-            ct[i].load_op = SDL_GPU_LOADOP_CLEAR;
-            ct[i].store_op = SDL_GPU_STOREOP_STORE;
-            ct[i].clear_color.r = -3.0e38f;
+    /* the translucent list: sorted, blended as drawn, and peeled */
+    for (i = 0; i < nsteps; i++) {
+        if (!steps[i].peel) {
+            if (rp == NULL) {
+                rp = begin(cmd, frame_tex[0], 0, 0.0f, 0);
+            }
+            draw_batches(cmd, rp, sorted + steps[i].from, steps[i].to - steps[i].from, RD_TRANS, P_SORTED, 0, NULL, -1);
+            continue;
         }
-        SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, ct, 2, NULL));
-    }
-    if (counting) {
-        SDL_GPUTextureLocation from, to;
-        count_layers(cmd, begin(cmd, count_tex, 1, 0.0f, 0), layers, entries);
-        /* the frame copied once: from then on each layer copies only the last layer's pixels */
-        copy = SDL_BeginGPUCopyPass(cmd);
-        memset(&from, 0, sizeof from);
-        memset(&to, 0, sizeof to);
-        from.texture = frame_tex[0], to.texture = frame_tex[1];
-        SDL_CopyGPUTextureToTexture(copy, &from, &to, (Uint32)frame_w, (Uint32)frame_h, 1, false);
-        SDL_EndGPUCopyPass(copy);
-    }
-    for (layer = 0; layer < layers; layer++) {
-        int cur = layer & 1, last = cur ^ 1;
-        SDL_GPUTexture* keys[5] = { NULL };
-        /* the nearest 1/w past the last layer */
-        keys[0] = key_q[last], keys[1] = key_o[last];
-        rp = begin(cmd, key_q[cur], 1, 3.0e38f, 0);
-        draw_whole(cmd, rp, P_KEY, 1, keys, counting ? layer * entries : -1);
-        SDL_EndGPURenderPass(rp);
-        /* the first triangle at it */
-        keys[2] = key_q[cur];
-        rp = begin(cmd, key_o[cur], 1, 3.0e38f, 0);
-        draw_whole(cmd, rp, P_KEY, 2, keys, counting ? layer * entries : -1);
-        SDL_EndGPURenderPass(rp);
-        /* its fragment, blended by the shader over a copy of the frame */
-        if (!counting) {
-            SDL_GPUTextureLocation from, to;
-            copy = SDL_BeginGPUCopyPass(cmd);
-            memset(&from, 0, sizeof from);
-            memset(&to, 0, sizeof to);
-            from.texture = frame_tex[f], to.texture = frame_tex[f ^ 1];
-            SDL_CopyGPUTextureToTexture(copy, &from, &to, (Uint32)frame_w, (Uint32)frame_h, 1, false);
-            SDL_EndGPUCopyPass(copy);
+        if (rp != NULL) {
+            SDL_EndGPURenderPass(rp);
+            rp = NULL;
         }
-        keys[0] = keys[1] = NULL, keys[3] = key_o[cur], keys[4] = frame_tex[f];
-        f ^= 1;
-        rp = begin(cmd, frame_tex[f], 0, 0.0f, 0);
-        if (counting && layer > 0) {
-            /* the copy's pixels the last layer changed */
-            SDL_GPUTexture* last_keys[5] = { key_q[last], key_o[last], NULL, NULL, frame_tex[f ^ 1] };
-            draw_whole(cmd, rp, P_FIX, 4, last_keys, layer * entries + 1);
-        }
-        draw_list(cmd, rp, RD_TRANS, P_PEEL, 3, keys, counting ? layer * entries + 2 : -1);
-        SDL_EndGPURenderPass(rp);
+        peel(cmd, &steps[i], layers);
     }
-    if (f != 0) {
-        /* always the same texture, for the caller */
-        SDL_GPUTextureLocation from, to;
-        copy = SDL_BeginGPUCopyPass(cmd);
-        memset(&from, 0, sizeof from);
-        memset(&to, 0, sizeof to);
-        from.texture = frame_tex[1], to.texture = frame_tex[0];
-        SDL_CopyGPUTextureToTexture(copy, &from, &to, (Uint32)frame_w, (Uint32)frame_h, 1, false);
-        SDL_EndGPUCopyPass(copy);
+    if (rp != NULL) {
+        SDL_EndGPURenderPass(rp);
     }
     return finish(cmd);
 }

@@ -15,7 +15,8 @@
 BIND(0, 2) cbuffer Count : register(b0, space2) {
     uint width, height;     /* the counts' */
     uint layers;            /* drawn at most */
-    uint entries;           /* a layer's draws: its keys', the last layer's pixels', then the batches' */
+    uint entries;           /* a layer's draws: its keys', the last layer's pixels', the screen's for the keys and for
+                               the last layer's pixels, then the batches' */
 };
 
 #ifdef MOST
@@ -56,8 +57,8 @@ void cs_draws(uint i : SV_GroupIndex) {
     GroupMemoryBarrierWithGroupSync();
     for (uint k = i; k < layers * entries; k += 64) {
         uint l = k / entries, e = k % entries;
-        uint2 d = draws[e < 2 ? 0 : e - 1];
-        bool on = e == 1 ? l >= 1 && l <= n : l < n;
+        uint2 d = e >= 4 ? draws[e - 3] : e >= 2 ? uint2(0, 6) : draws[0];
+        bool on = e == 1 || e == 3 ? l >= 1 && l <= n : l < n;
         args[k] = uint4(on ? d.y : 0, 1, d.x, 0);
     }
 }
