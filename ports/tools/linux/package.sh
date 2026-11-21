@@ -34,7 +34,7 @@ cat /opt/runtime-i686 "$stage/app.squashfs" > "$s/MvC2-$v-i686.AppImage"
 chmod 755 "$s/MvC2-$v-i686.AppImage"
 mkdir -p "$s/roms/mvsc2" "$s/disc"
 touch "$s/roms/mvsc2/PUT mvsc2.zip HERE.txt" "$s/disc/PUT THE USA DISC'S FILES HERE.txt"
-lic=$port/LICENSE; [ -f "$lic" ] || lic=$port/../LICENSE    # the public tree has it at its root
+lic=$port/LICENSE; [ -f "$lic" ] || lic=${MVC2_DECOMP:-$port/..}/LICENSE    # the public tree has it at its root
 cp "$lic" "$s/LICENSE.txt"
 cp "$port/NOTICE.md" "$s/NOTICE.md"
 chmod 644 "$s"/*.md "$s/LICENSE.txt" "$s/mvc2.cfg" "$s"/*/*/*.txt "$s"/disc/*.txt
