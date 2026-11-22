@@ -1,2 +1,4 @@
 pls18_00	pls18_00_idle_init	ef_char_set2( ew, 27, tbl->no + Rnd() % 3, Rnd() % 10 ) ;	{ Uint32 rnd = Rnd() % 10 ; ef_char_set2( ew, 27, tbl->no + Rnd() % 3, rnd ) ; }	1
 pls18_00	pls18_00_idle_fix_init	ef_char_set2( ew, 27, tbl->no + Rnd() % 3, Rnd() % 10 ) ;	{ Uint32 rnd = Rnd() % 10 ; ef_char_set2( ew, 27, tbl->no + Rnd() % 3, rnd ) ; }	1
+shl17_00	shl17_00_curve	den = ( x = ew->spd.x ) * x * x - ( x + ( y = ew->acc.x ) ) * x * x * 1.5f + 3.0f * ( x * x * y ) ;	x = ew->spd.x ; y = ew->acc.x ; den = x * x * x - ( x + y ) * x * x * 1.5f + 3.0f * ( x * x * y ) ;	1
+shl17_03	shl17_03_curve	d = ( x = ew->spd.x ) * x * x - ( x + ( y = ew->acc.x ) ) * x * x * 1.5f + 3.0f * ( x * x * y ) ;	x = ew->spd.x ; y = ew->acc.x ; d = x * x * x - ( x + y ) * x * x * 1.5f + 3.0f * ( x * x * y ) ;	1

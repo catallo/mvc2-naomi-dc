@@ -113,7 +113,8 @@ def arm_unsigned(game, out, program):
         obj = out / (src.name + ".arm.o")
         if src.parent != PORT / "game":   # the host's copy, with the uses arm_u32.tsv lists made through sh_u32
             copy = out / (src.stem + ".arm.c")
-            fmac.rewrite(PORT / "data" / ("fmac_%s.tsv" % program), src, copy, PORT / "data" / "arm_u32.tsv")
+            fmac.rewrite(PORT / "data" / ("fmac_%s.tsv" % program), src, copy,
+                         [PORT / "data" / e for e in ("arg_order.tsv", "board_reads.tsv", "arm_u32.tsv")])
             src, near = copy, ["-iquote", str(src.parent)]
         else:
             near = []
