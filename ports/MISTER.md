@@ -12,6 +12,8 @@ Copy `mvc2-mister-VERSION.tar.gz` and `mvc2_setup.sh` into `/media/fat/Scripts`,
 MiSTer's Scripts menu. It says which Pinedra it found, puts the game's files in place, adds a `[MVC2 Pinedra]`
 section to MiSTer.ini (after keeping a dated copy of it, `MiSTer.ini.mvc2-DATE`) and says which game data it
 found. Run it again to update; `mvc2_setup.sh --uninstall` removes it all except the game's data and saves.
+The menu entries load Pinedra's core, `pinedra/config/Pinedra Collection.rbf`; with a Pinedra from before release
+20261122, which called it Pinedra Config, they load that one, and after updating Pinedra, run `mvc2_setup` again.
 
 Besides that section and the copy, it writes only these:
 
@@ -58,13 +60,21 @@ The first pad is player 1's, the second player 2's.
 
 F12 (or the pad's OSD button) opens it. Its options are Pinedra's own, as for its games: the analog output
 (31 kHz 480p or 15 kHz), interlaced or progressive at 15 kHz, 60 or 50 Hz (the game is made for 60), and which
-output the frame rate follows. For a 15 kHz CRT, Pinedra Config's "Enable 240p mode" (its Settings page) draws the
+output the frame rate follows. For a 15 kHz CRT, Pinedra Collection's "Enable 240p mode" (its Settings page) draws the
 game in 240 lines, shown without interlace. A line in `games/mvc2/env.txt` sets it for this game alone:
 `PND_240P=1` on, `PND_240P=0` off. The game's own settings (difficulty, timer and the rest) are in its options or the
 arcade's test menu, and kept in `games/mvc2`.
 
 A TV with only S-Video or composite: `vga_mode=svideo` or `vga_mode=cvbs` in MiSTer.ini (with `vga_scaler=0`), and
 15 kHz in the OSD. Pinedra's core makes the colour (release 20261115 or later; not yet tried on a real set).
+
+## The ARM's clock
+
+While the game runs, the Pinedra driver holds the DE10-Nano's ARM at 1000 MHz (release 20261121 or later) and
+puts back the clock it found when the game ends. At the MiSTer's own 800 MHz the fights keep 60 frames a second,
+but the character select loses about four frames a second, half of them while a pick loads; at 1000 MHz half as
+many, most of them at the picks. A board that doesn't take 1000 MHz (the game hangs or the MiSTer stops
+answering): `PND_CPU_MHZ=800` in `games/mvc2/env.txt`.
 
 ## Quitting
 
