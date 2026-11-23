@@ -72,8 +72,8 @@ A TV with only S-Video or composite: `vga_mode=svideo` or `vga_mode=cvbs` in MiS
 
 While the game runs, the Pinedra driver holds the DE10-Nano's ARM at 1000 MHz (release 20261121 or later) and
 puts back the clock it found when the game ends. At the MiSTer's own 800 MHz the fights keep 60 frames a second,
-but the character select loses about four frames a second, half of them while a pick loads; at 1000 MHz half as
-many, most of them at the picks. A board that doesn't take 1000 MHz (the game hangs or the MiSTer stops
+but the character select loses about four frames a second, half of them while a pick loads; at 1000 MHz, with
+the driver ordering the translucent list (below), about a third as many, most of them at the picks. A board that doesn't take 1000 MHz (the game hangs or the MiSTer stops
 answering): `PND_CPU_MHZ=800` in `games/mvc2/env.txt`.
 
 ## Quitting
@@ -96,7 +96,13 @@ the GNU AGPL 3.0; its source is in `licenses/MiSTer_MVC2`. Pinedra GPU is © its
   unpacks the data it shows the progress the game puts on the shared page. It reads the core's video mode every
   500 ms as MiSTer's own main does, which sets the S-Video and composite colour up.
 - The picture: each frame's lists drawn by rd_gl1 and swapped at the core's vblank. `MVC2_GL1` sets its options
-  (default `less pool`).
+  (default `less pool order clut`). `order`: the translucent list goes to the Pinedra driver in the game's own order
+  as window-space vertices, and the driver orders and cuts it as the PVR did, on its thread on the second core;
+  the pictures differ from rd_gl1's own order by at most 3 of 255 on a few pixels. `clut`: a paletted texture goes
+  as its indices and colours and the driver makes its texels, so the sprite pool isn't needed; the same pictures.
+  Both need Pinedra release 20261123 (driver 0.5.44) or later, and `MVC2_GL1="less pool"` turns them off. At
+  800 MHz (`PND_CPU_MHZ=800`) the launcher leaves `order` out: the driver's thread would fill the second core in
+  the character select.
 - The sound: made on a thread of its own, resampled to 48 kHz and written to `/dev/MrAudio`, the ring the core
   plays; a read of the device gives the bytes it has left, and the sound is stretched by up to 0.5% to keep three
   frames there.

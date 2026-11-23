@@ -21,4 +21,8 @@ if [ -f env.txt ]; then
     set +a
 fi
 [ "$PND_240P" = 1 ] || unset PND_240P
+# at 800 MHz the translucent list ordered by the driver (rd_gl1's order, the default) fills the second core in the
+# character select, which then loses more frames than with rd_gl1's own order: there only the palettes go to the
+# driver (MVC2_GL1 in env.txt chooses for itself)
+[ "$PND_CPU_MHZ" = 800 ] && [ -z "$MVC2_GL1" ] && export MVC2_GL1="less pool clut"
 exec bin/mvc2-pinedra "$@"
