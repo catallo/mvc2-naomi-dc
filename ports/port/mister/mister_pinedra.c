@@ -365,6 +365,10 @@ int mister_gl_piped(void) {
     return piped;
 }
 
+int mister_gl_ordered(void) {
+    return !piped && rd_gl1_ordered();
+}
+
 /* the frame's states' textures, the palette and the fog as they are now, for the drawing to read */
 static void take(RD_FRAME* f, unsigned frame) {
     int i;

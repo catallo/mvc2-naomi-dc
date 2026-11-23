@@ -2659,6 +2659,10 @@ static GLuint small_texture(int w, const uint8_t* rgba) {
     return name;
 }
 
+int rd_gl1_ordered(void) {
+    return ord_on;
+}
+
 int rd_gl1_init(RD_GL_PROC proc) {
     static const uint8_t white[4] = { 255, 255, 255, 255 };
     static const float opaque[4] = { 0, 0, 0, 1 };

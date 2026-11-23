@@ -71,10 +71,9 @@ A TV with only S-Video or composite: `vga_mode=svideo` or `vga_mode=cvbs` in MiS
 ## The ARM's clock
 
 While the game runs, the Pinedra driver holds the DE10-Nano's ARM at 1000 MHz (release 20261121 or later) and
-puts back the clock it found when the game ends. At the MiSTer's own 800 MHz the fights keep 60 frames a second,
-but the character select loses about four frames a second, half of them while a pick loads; at 1000 MHz, with
-the driver ordering the translucent list (below), about a third as many, most of them at the picks. A board that doesn't take 1000 MHz (the game hangs or the MiSTer stops
-answering): `PND_CPU_MHZ=800` in `games/mvc2/env.txt`.
+puts back the clock it found when the game ends. At 1000 MHz the arcade game's select and fights keep 60 frames a
+second; at the MiSTer's own 800 MHz a few frames are lost, most of them while a pick loads. A board that doesn't
+take 1000 MHz (the game hangs or the MiSTer stops answering): `PND_CPU_MHZ=800` in `games/mvc2/env.txt`.
 
 ## Quitting
 
