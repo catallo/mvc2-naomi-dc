@@ -113,7 +113,7 @@ RD_GL1_STATS rd_gl1_stats;
 /* order: the translucent list given in its own order as window-space vertices, the driver ordering it as the PVR did
    (GL_PND_ordered_translucency, GL_PND_window_vertices); clut: a paletted texture sent as its indices and its colours,
    the driver making the texels on its own thread (GL_EXT_paletted_texture). Each where the driver has it */
-static int order_want, clut_want, ord_on, ord_live, clut_on;
+static int order_want, clut_want, ord_on, ord_frame, ord_live, clut_on;
 static void(GLCALL* glWindowOriginPND)(GLenum);
 static void(GLCALL* glColorTableEXT)(GLenum, GLenum, GLsizei, GLenum, GLenum, const void*);
 
@@ -1385,7 +1385,7 @@ static void put_tri(int list, const RD_TRI* t, int check) {
         !grow((void**)&ix, &maxix, nix + 3, sizeof *ix)) {
         return;
     }
-    if (ord_on && list == RD_TRANS) {
+    if (ord_frame && list == RD_TRANS) {
         win_tri(s, t, flat, tri);
     } else if (flat) {
         /* one 1/w: one depth and one fog coordinate */
@@ -2148,12 +2148,31 @@ static void deep_box(DEEP* e, int nshal) {
     }
 }
 
+/* the driver's window vertices don't take a corner far past the screen (the attract's sky, millions of pixels off):
+   a frame with a model's corner there is ordered here */
+static int order_fits(void) {
+    const RD_TRI* t = fr->tris[RD_TRANS];
+    int n = fr->ntris[RD_TRANS], i, k;
+    for (i = 0; i < n; i++) {
+        prefetch_tri(&t[i + 8]);
+        if (fr->states[t[i].state].origin != RD_SCENE) {
+            continue;
+        }
+        for (k = 0; k < 3; k++) {
+            if ((zbits(t[i].v[k].x) & 0x7FFFFFFFu) > 0x45800000u || (zbits(t[i].v[k].y) & 0x7FFFFFFFu) > 0x45800000u) {
+                return 0;   /* past 4096 */
+            }
+        }
+    }
+    return 1;
+}
+
 static void put_trans(void) {
     const RD_TRI* tris = fr->tris[RD_TRANS];
     int n = fr->ntris[RD_TRANS], i, j, nshal = 0, ndeep = 0, k, grid, sweep, ahead;
     const SORTED* r;
     nitems = nparts = 0;
-    if (ord_on) {
+    if (ord_frame) {
         /* in the game's own order: the driver orders and cuts them */
         for (i = 0; i < n; i++) {
             prefetch_tri(&tris[i + 8]);
@@ -2537,7 +2556,7 @@ static void draw_batches(int upto) {
         if (late && drawn == solid) {
             background(1);
         }
-        if (ord_on && drawn >= solid && !ord_live) {
+        if (ord_frame && drawn >= solid && !ord_live) {
             glEnable(GL_WINDOW_VERTICES_PND);
             glEnable(GL_ORDERED_TRANSLUCENCY_PND);
             ord_live = 1;
@@ -2603,6 +2622,7 @@ void rd_gl1_draw_frame(RD_FRAME* f, const uint32_t* palette, const RD_FOG* fog_o
         }
     }
     solid = nbatches;
+    ord_frame = ord_on && order_fits();
     put_trans();
     rd_gl1_stats.us_build = us_since(t0);
     t0 = SDL_GetPerformanceCounter();
